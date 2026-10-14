@@ -1,0 +1,46 @@
+{
+  "run_id": "run_20241015_143022",
+  "completed": true,
+  "stage1": {
+    "best_checkpoint": "best_stage1_visual.pt",
+    "final_epoch": 29,
+    "best_val_separation_ratio": 3.741,
+    "checkpoints": [
+      "stage1_visual_epoch0004.pt",
+      "stage1_visual_epoch0009.pt",
+      "stage1_visual_epoch0014.pt",
+      "stage1_visual_epoch0019.pt",
+      "stage1_visual_epoch0024.pt",
+      "stage1_visual_epoch0029.pt",
+      "best_stage1_visual.pt",
+      "best_stage1_text.pt",
+      "best_stage1_signal.pt"
+    ]
+  },
+  "stage2": {
+    "best_checkpoint": "best_stage2.pt",
+    "final_epoch": 49,
+    "best_val_auc": 0.9748,
+    "checkpoints": [
+      "stage2_epoch0004.pt",
+      "stage2_epoch0009.pt",
+      "stage2_epoch0014.pt",
+      "stage2_epoch0019.pt",
+      "stage2_epoch0024.pt",
+      "stage2_epoch0029.pt",
+      "stage2_epoch0034.pt",
+      "stage2_epoch0039.pt",
+      "stage2_epoch0044.pt",
+      "stage2_epoch0049.pt",
+      "best_stage2.pt"
+    ]
+  },
+  "model_sizes": {
+    "visual_encoder": "4.1 MB",
+    "text_encoder": "1.2 MB  (backbone cached separately)",
+    "signal_encoder": "3.8 MB",
+    "expert_agents": "5.6 MB  (includes all three encoders + heads)",
+    "judge": "0.09 MB",
+    "total": "5.7 MB  (stage2 checkpoint)"
+  }
+}

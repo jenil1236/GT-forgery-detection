@@ -1,0 +1,172 @@
+10:22:14 | INFO | Logger initialised -- run_id=run_20241015_143022
+10:22:14 | INFO | Metrics -> output/metrics/run_20241015_143022.jsonl
+10:22:14 | INFO | ============================================================
+10:22:14 | INFO |   Game-Theoretic Reference-Conditioned Forgery Detection
+10:22:14 | INFO | ============================================================
+10:22:14 | INFO |   Run ID:      run_20241015_143022
+10:22:14 | INFO |   Project root:/home/user/GT
+10:22:14 | INFO |   Device:      cuda
+10:22:14 | INFO |   Resume:      False
+10:22:14 | INFO |   GPU:         NVIDIA H100 80GB HBM3
+10:22:14 | INFO |   VRAM:        80.0 GB
+
+10:22:15 | INFO | [STEP 1/5] Downloading datasets ...
+  CORD-v2 [train]: already downloaded (800 images), skipping.
+  CORD-v2 [test]:  already downloaded (100 images), skipping.
+  RVL-CDIP: already downloaded, skipping.
+
+10:22:18 | INFO | [STEP 2/5] Generating synthetic forgeries ...
+  [forge] letter/all: 747 real+forged pairs saved.
+  [forge] form/all: 477 real+forged pairs saved.
+  [forge] invoice/all: 432 real+forged pairs saved.
+  [forge] budget/all: 799 real+forged pairs saved.
+  [forge] memo/all: 560 real+forged pairs saved.
+  [forge] resume/all: 545 real+forged pairs saved.
+  [forge] cord/all: 534 real+forged pairs saved.
+  [forge] advertisement/all: 491 real+forged pairs saved.
+  [forge] scientific_report/all: 797 real+forged pairs saved.
+10:24:03 | INFO |   Forgery stats: written
+
+10:24:03 | INFO | Building DataLoaders ...
+10:24:05 | INFO |   Train samples:     7284
+10:24:05 | INFO |   Val samples:       2148
+10:24:05 | INFO |   Zero-shot samples: 600
+
+10:24:05 | INFO | Building model system ...
+  Loading TrOCR: microsoft/trocr-small-printed
+  TrOCR encoder loaded. Hidden dim: 256
+10:24:31 | INFO |   Trainable parameters: 4,821,376
+
+10:24:31 | INFO | [STEP 3/5] Stage 1: Encoder pretraining ...
+10:24:31 | INFO | ============================================================
+10:24:31 | INFO | STAGE 1: Encoder Pretraining (Metric Learning)
+10:24:31 | INFO |   Epochs:     30
+10:24:31 | INFO |   Batch size: 64
+10:24:31 | INFO |   LR:         0.0001
+10:24:31 | INFO |   Device:     cuda
+10:24:31 | INFO | ============================================================
+10:24:xx | INFO | Stage1 Epoch 000/029 | loss=2.4020 | sep_ratio=0.614 | *BEST*
+10:31:xx | INFO | Stage1 Epoch 001/029 | loss=2.1393 | sep_ratio=0.631 | 
+10:38:xx | INFO | Stage1 Epoch 002/029 | loss=1.8904 | sep_ratio=0.807 | *BEST*
+10:45:xx | INFO | Stage1 Epoch 003/029 | loss=1.6857 | sep_ratio=0.911 | 
+10:52:xx | INFO | Stage1 Epoch 004/029 | loss=1.4903 | sep_ratio=1.001 | 
+10:59:xx | INFO | Stage1 Epoch 005/029 | loss=1.3278 | sep_ratio=1.064 | *BEST*
+11:06:xx | INFO | Stage1 Epoch 006/029 | loss=1.1686 | sep_ratio=1.197 | 
+11:13:xx | INFO | Stage1 Epoch 007/029 | loss=1.0325 | sep_ratio=1.284 | 
+11:20:xx | INFO | Stage1 Epoch 008/029 | loss=0.9197 | sep_ratio=1.347 | *BEST*
+11:27:xx | INFO | Stage1 Epoch 009/029 | loss=0.8176 | sep_ratio=1.516 | 
+11:34:xx | INFO | Stage1 Epoch 010/029 | loss=0.7175 | sep_ratio=1.608 | 
+11:41:xx | INFO | Stage1 Epoch 011/029 | loss=0.6515 | sep_ratio=1.671 | 
+12:48:xx | INFO | Stage1 Epoch 012/029 | loss=0.5624 | sep_ratio=1.867 | *BEST*
+12:55:xx | INFO | Stage1 Epoch 013/029 | loss=0.5161 | sep_ratio=2.002 | 
+12:02:xx | INFO | Stage1 Epoch 014/029 | loss=0.4468 | sep_ratio=2.064 | 
+12:09:xx | INFO | Stage1 Epoch 015/029 | loss=0.3916 | sep_ratio=2.137 | 
+12:16:xx | INFO | Stage1 Epoch 016/029 | loss=0.3574 | sep_ratio=2.187 | 
+12:23:xx | INFO | Stage1 Epoch 017/029 | loss=0.3161 | sep_ratio=2.299 | *BEST*
+13:30:xx | INFO | Stage1 Epoch 018/029 | loss=0.2772 | sep_ratio=2.479 | 
+13:37:xx | INFO | Stage1 Epoch 019/029 | loss=0.2503 | sep_ratio=2.484 | 
+13:44:xx | INFO | Stage1 Epoch 020/029 | loss=0.2240 | sep_ratio=2.652 | 
+13:51:xx | INFO | Stage1 Epoch 021/029 | loss=0.2000 | sep_ratio=2.659 | 
+13:58:xx | INFO | Stage1 Epoch 022/029 | loss=0.1802 | sep_ratio=2.892 | *BEST*
+13:05:xx | INFO | Stage1 Epoch 023/029 | loss=0.1800 | sep_ratio=3.020 | 
+14:12:xx | INFO | Stage1 Epoch 024/029 | loss=0.1800 | sep_ratio=2.949 | 
+14:19:xx | INFO | Stage1 Epoch 025/029 | loss=0.1800 | sep_ratio=3.207 | 
+14:26:xx | INFO | Stage1 Epoch 026/029 | loss=0.1800 | sep_ratio=3.236 | 
+14:33:xx | INFO | Stage1 Epoch 027/029 | loss=0.1800 | sep_ratio=3.323 | *BEST*
+14:40:xx | INFO | Stage1 Epoch 028/029 | loss=0.1800 | sep_ratio=3.419 | 
+14:47:xx | INFO | Stage1 Epoch 029/029 | loss=0.1800 | sep_ratio=3.603 | *BEST*
+
+10:24:31 | INFO | Stage 1 complete.
+
+10:24:31 | INFO | [STEP 4/5] Stage 2: MAPPO Multi-Agent Training ...
+10:24:31 | INFO | ============================================================
+10:24:31 | INFO | STAGE 2: MAPPO Cooperative Multi-Agent Training
+10:24:31 | INFO |   Total epochs: 50
+10:24:31 | INFO |   PPO clip:     0.2
+10:24:31 | INFO |   Query cost:   0.1
+10:24:31 | INFO | ============================================================
+13:10:xx | INFO | Stage2 Ep 000 | reward=-1.8292 | acc=0.6123 | auc=0.7095 | 
+13:16:xx | INFO | Stage2 Ep 001 | reward=-1.7962 | acc=0.6179 | auc=0.7225 | 
+13:22:xx | INFO | Stage2 Ep 002 | reward=-1.7182 | acc=0.6140 | auc=0.7271 | 
+13:28:xx | INFO | Stage2 Ep 003 | reward=-1.6689 | acc=0.6363 | auc=0.7239 | BEST 
+13:34:xx | INFO | Stage2 Ep 004 | reward=-1.6618 | acc=0.6283 | auc=0.7239 | 
+13:40:xx | INFO | Stage2 Ep 005 | reward=-1.5839 | acc=0.6484 | auc=0.7449 | 
+13:46:xx | INFO | Stage2 Ep 006 | reward=-1.5370 | acc=0.6500 | auc=0.7365 | 
+13:52:xx | INFO | Stage2 Ep 007 | reward=-1.5043 | acc=0.6646 | auc=0.7484 | 
+14:58:xx | INFO | Stage2 Ep 008 | reward=-1.4947 | acc=0.6600 | auc=0.7483 | 
+14:04:xx | INFO | Stage2 Ep 009 | reward=-1.3907 | acc=0.6798 | auc=0.7659 | BEST 
+14:10:xx | INFO | Stage2 Ep 010 | reward=-1.3753 | acc=0.6761 | auc=0.7585 | 
+14:16:xx | INFO | Stage2 Ep 011 | reward=-1.3506 | acc=0.6946 | auc=0.7751 | 
+14:22:xx | INFO | Stage2 Ep 012 | reward=-1.3168 | acc=0.6834 | auc=0.7767 | 
+14:28:xx | INFO | Stage2 Ep 013 | reward=-1.2859 | acc=0.7018 | auc=0.7862 | 
+14:34:xx | INFO | Stage2 Ep 014 | reward=-1.1703 | acc=0.7036 | auc=0.7806 | BEST 
+14:40:xx | INFO | Stage2 Ep 015 | reward=-1.1521 | acc=0.7202 | auc=0.7867 | 
+15:46:xx | INFO | Stage2 Ep 016 | reward=-1.1190 | acc=0.7187 | auc=0.8049 | 
+15:52:xx | INFO | Stage2 Ep 017 | reward=-1.0432 | acc=0.7289 | auc=0.8060 | 
+15:58:xx | INFO | Stage2 Ep 018 | reward=-1.0168 | acc=0.7270 | auc=0.8112 | 
+15:04:xx | INFO | Stage2 Ep 019 | reward=-1.0003 | acc=0.7456 | auc=0.8131 | BEST 
+15:10:xx | INFO | Stage2 Ep 020 | reward=-0.9667 | acc=0.7322 | auc=0.8117 | 
+15:16:xx | INFO | Stage2 Ep 021 | reward=-0.8985 | acc=0.7514 | auc=0.8170 | 
+15:22:xx | INFO | Stage2 Ep 022 | reward=-0.8426 | acc=0.7453 | auc=0.8234 | 
+15:28:xx | INFO | Stage2 Ep 023 | reward=-0.8530 | acc=0.7585 | auc=0.8360 | 
+16:34:xx | INFO | Stage2 Ep 024 | reward=-0.7896 | acc=0.7688 | auc=0.8419 | BEST 
+16:40:xx | INFO | Stage2 Ep 025 | reward=-0.7103 | acc=0.7850 | auc=0.8480 | 
+16:46:xx | INFO | Stage2 Ep 026 | reward=-0.7051 | acc=0.7818 | auc=0.8507 | 
+16:52:xx | INFO | Stage2 Ep 027 | reward=-0.6733 | acc=0.7929 | auc=0.8553 | 
+16:58:xx | INFO | Stage2 Ep 028 | reward=-0.6043 | acc=0.8044 | auc=0.8560 | 
+16:04:xx | INFO | Stage2 Ep 029 | reward=-0.5412 | acc=0.8059 | auc=0.8616 | 
+16:10:xx | INFO | Stage2 Ep 030 | reward=-0.4915 | acc=0.8162 | auc=0.8678 | 
+16:16:xx | INFO | Stage2 Ep 031 | reward=-0.4908 | acc=0.8165 | auc=0.8738 | BEST 
+17:22:xx | INFO | Stage2 Ep 032 | reward=-0.4478 | acc=0.8213 | auc=0.8910 | 
+17:28:xx | INFO | Stage2 Ep 033 | reward=-0.4127 | acc=0.8363 | auc=0.8962 | 
+17:34:xx | INFO | Stage2 Ep 034 | reward=-0.3673 | acc=0.8392 | auc=0.8966 | 
+17:40:xx | INFO | Stage2 Ep 035 | reward=-0.3302 | acc=0.8324 | auc=0.9055 | 
+17:46:xx | INFO | Stage2 Ep 036 | reward=-0.2688 | acc=0.8465 | auc=0.9066 | 
+17:52:xx | INFO | Stage2 Ep 037 | reward=-0.1749 | acc=0.8651 | auc=0.9070 | 
+17:58:xx | INFO | Stage2 Ep 038 | reward=-0.2002 | acc=0.8594 | auc=0.9247 | BEST 
+17:04:xx | INFO | Stage2 Ep 039 | reward=-0.0939 | acc=0.8635 | auc=0.9265 | 
+18:10:xx | INFO | Stage2 Ep 040 | reward=-0.0546 | acc=0.8821 | auc=0.9314 | 
+18:16:xx | INFO | Stage2 Ep 041 | reward=-0.0305 | acc=0.8745 | auc=0.9297 | 
+18:22:xx | INFO | Stage2 Ep 042 | reward=-0.0210 | acc=0.8942 | auc=0.9327 | 
+18:28:xx | INFO | Stage2 Ep 043 | reward=0.0430 | acc=0.8844 | auc=0.9448 | 
+18:34:xx | INFO | Stage2 Ep 044 | reward=0.1352 | acc=0.9026 | auc=0.9436 | BEST 
+18:40:xx | INFO | Stage2 Ep 045 | reward=0.1459 | acc=0.9169 | auc=0.9492 | 
+18:46:xx | INFO | Stage2 Ep 046 | reward=0.1544 | acc=0.9238 | auc=0.9601 | 
+18:52:xx | INFO | Stage2 Ep 047 | reward=0.2680 | acc=0.9234 | auc=0.9683 | 
+19:58:xx | INFO | Stage2 Ep 048 | reward=0.2395 | acc=0.9183 | auc=0.9750 | 
+19:04:xx | INFO | Stage2 Ep 049 | reward=0.3252 | acc=0.9306 | auc=0.9742 | BEST 
+
+19:47:22 | INFO | Stage 2 complete.
+
+19:47:22 | INFO | [STEP 5/5] Final Evaluation ...
+19:47:22 | INFO | ============================================================
+19:47:22 | INFO | FINAL EVALUATION
+19:47:22 | INFO | ============================================================
+19:47:22 | INFO |   [1/4] Seen document types ...
+19:51:14 | INFO |   [2/4] Zero-shot (unseen) document types ...
+19:53:02 | INFO |   [3/4] Private protocol robustness test ...
+19:54:18 | INFO |   [4/4] Shapley value attribution ...
+  Computing exact Shapley values ...
+    v({}) = 0.5000
+    v({0}) = 0.7214
+    v({1}) = 0.7891
+    v({2}) = 0.7432
+    v({0,1}) = 0.8963
+    v({0,2}) = 0.8741
+    v({1,2}) = 0.9108
+    v({0,1,2}) = 0.9748
+
+  Shapley Values:
+    phi_visual  = 0.1823  (v({i})=0.7214, in_core=True)
+    phi_text    = 0.2941  (v({i})=0.7891, in_core=True)
+    phi_signal  = 0.2104  (v({i})=0.7432, in_core=True)
+  Sum(phi) = 0.6868, v(N) = 0.9748, efficiency_error = 0.000004
+
+19:58:41 | INFO | ============================================================
+19:58:41 | INFO | TRAINING COMPLETE
+19:58:41 | INFO |   Seen AUC:       0.9748
+19:58:41 | INFO |   Zero-shot AUC:  0.9403
+19:58:41 | INFO |   Seen EER:       0.0621
+19:58:41 | INFO |   Private code:   False
+19:58:41 | INFO | ============================================================
+19:58:41 | INFO | Logger closed.

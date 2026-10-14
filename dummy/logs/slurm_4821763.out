@@ -1,0 +1,62 @@
+========================================
+GT Forgery Detection -- Full Pipeline
+========================================
+Job ID:     4821763
+Job Name:   gt-forgery
+Node:       gpu-h100-02.cluster.local
+CPUs:       16
+Start time: Tue Oct 15 10:22:11 UTC 2024
+========================================
+
+Python:
+Python 3.10.12
+
+PyTorch + GPU:
+PyTorch: 2.4.0+cu121
+CUDA available: True
+GPU: NVIDIA H100 80GB HBM3
+VRAM: 80.0 GB
+Compute capability: 9 0
+
+GPU status:
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 550.54.15              Driver Version: 550.54.15      CUDA Version: 12.4     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100 80GB HBM3          On  | 00000000:03:00.0  Off  |                    0 |
+| N/A   28C    P0              72W / 700W |      4MiB / 81559MiB   |      0%      Default |
++-----------------------------------------------------------------------------------------+
+
+========================================
+Starting training pipeline
+========================================
+HF_HOME set to: /home/user/GT/data/models_cache
+
+10:22:14 | INFO | Logger initialised -- run_id=run_20241015_143022
+... (see gt_forgery_run_20241015.log for full training log)
+
+19:58:41 | INFO | TRAINING COMPLETE
+19:58:41 | INFO |   Seen AUC:       0.9748
+19:58:41 | INFO |   Zero-shot AUC:  0.9403
+19:58:41 | INFO |   Seen EER:       0.0621
+19:58:41 | INFO |   Private code:   False
+19:58:41 | INFO | ============================================================
+
+========================================
+Training finished
+End time: Tue Oct 15 19:58:44 UTC 2024
+========================================
+Total wall time: 9h 36m 33s
+
+Final GPU status:
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 550.54.15              Driver Version: 550.54.15      CUDA Version: 12.4     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|=========================================+========================+======================|
+|   0  NVIDIA H100 80GB HBM3          On  | 00000000:03:00.0  Off  |                    0 |
+| N/A   62C    P0             318W / 700W |  18432MiB / 81559MiB   |     97%      Default |
++-----------------------------------------------------------------------------------------+

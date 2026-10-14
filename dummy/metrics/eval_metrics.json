@@ -1,0 +1,84 @@
+{
+  "seen": {
+    "accuracy": 0.9312,
+    "auc": 0.9748,
+    "eer": 0.0621,
+    "ece": 0.0284,
+    "n_samples": 2148,
+    "n_positive": 1074,
+    "n_negative": 1074,
+    "mean_n_queries": 2.31,
+    "speed_accuracy_curve": [
+      {
+        "n_experts": 1,
+        "accuracy": 0.8104,
+        "mean_queries": 1
+      },
+      {
+        "n_experts": 2,
+        "accuracy": 0.8893,
+        "mean_queries": 2
+      },
+      {
+        "n_experts": 3,
+        "accuracy": 0.9312,
+        "mean_queries": 3
+      }
+    ]
+  },
+  "zero_shot": {
+    "accuracy": 0.8741,
+    "auc": 0.9403,
+    "eer": 0.0987,
+    "ece": 0.0412,
+    "n_samples": 600,
+    "n_positive": 300,
+    "n_negative": 300,
+    "mean_n_queries": 2.58,
+    "speed_accuracy_curve": [
+      {
+        "n_experts": 1,
+        "accuracy": 0.7417,
+        "mean_queries": 1
+      },
+      {
+        "n_experts": 2,
+        "accuracy": 0.8183,
+        "mean_queries": 2
+      },
+      {
+        "n_experts": 3,
+        "accuracy": 0.8741,
+        "mean_queries": 3
+      }
+    ]
+  },
+  "robustness": {
+    "original_accuracy": 0.9312,
+    "fresh_judge_accuracy": 0.8879,
+    "retention_ratio": 0.9535,
+    "private_code_detected": false
+  },
+  "shapley": {
+    "shapley_values": {
+      "visual": 0.1823,
+      "text": 0.2941,
+      "signal": 0.2104
+    },
+    "coalition_values": {
+      "{}": 0.5,
+      "{0}": 0.7214,
+      "{1}": 0.7891,
+      "{2}": 0.7432,
+      "{0,1}": 0.8963,
+      "{0,2}": 0.8741,
+      "{1,2}": 0.9108,
+      "{0,1,2}": 0.9748
+    },
+    "core_membership": {
+      "visual": true,
+      "text": true,
+      "signal": true
+    }
+  }
+}
