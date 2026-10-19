@@ -1,4 +1,4 @@
-﻿"""
+"""
 visual_encoder.py - Visual expert encoder.
 
 EfficientNet-B0 backbone with a 2-layer projection MLP.
@@ -41,7 +41,7 @@ class VisualEncoder(nn.Module):
         # Projection MLP
         self.projector = nn.Sequential(
             nn.Linear(backbone_out_dim, 512),
-            nn.BatchNorm1d(512),
+            nn.LayerNorm(512),
             nn.ReLU(inplace=True),
             nn.Dropout(0.1),
             nn.Linear(512, embed_dim),

@@ -1,196 +1,379 @@
-﻿"""
-dataset.py - PairedDocumentDataset
+"""
+dataset.py - IDNet ESP dataset loader.
 
-Each sample:  (reference, test, label)
-  reference = a REAL image of the SAME doc_type (different instance)
-  test      = real or forged image
-  label     = 0 (genuine) | 1 (forged)
+Directory layout on disk:
+  data/raw/ESP/
+    original/                  <- genuine images (0001.png, ...)
+    text_field_replacement/    <- forgery type 0
+    face_morphing/             <- forgery type 1
+    portrait_substitution/     <- forgery type 2
+    mixed_fraud/               <- forgery type 3
 
-Returns a dict with keys:
-  ref_visual,  ref_text,  ref_signal    -> reference image, 3 modalities
-  test_visual, test_text, test_signal   -> test image, 3 modalities
-  label        -> int tensor {0, 1}
-  doc_type     -> string
+For every original image we produce 5 samples per epoch:
+  1 genuine  (label=0, forgery_type="genuine")
+  4 forged   (label=1, one per forgery folder)
 
-ZeroShotDataset wraps the same logic for held-out document types.
+Each sample also contains a reference image: a DIFFERENT original drawn
+at random from the same split.
 """
 
 from __future__ import annotations
+
+import logging
 import os
 import random
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import torch
-from torch.utils.data import Dataset
 from PIL import Image
+from torch.utils.data import DataLoader, Dataset
 
-from src.data.transforms import VisualTransform, TextTransform, SignalTransform
+from src.data.transforms import SignalTransform, TextTransform, VisualTransform
+
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+# Only fraud1-4 use exact filenames matching positive/
+# fraud5 and fraud6 use derived names and are excluded
+FORGERY_FOLDERS: List[str] = [
+    "fraud1_copy_and_move",
+    "fraud2_face_morphing",
+    "fraud3_face_replacement",
+    "fraud4_combined",
+]
+
+FORGERY_TYPES: List[str] = [
+    "fraud1_copy_and_move",
+    "fraud2_face_morphing",
+    "fraud3_face_replacement",
+    "fraud4_combined",
+]
 
 
-class PairedDocumentDataset(Dataset):
+# ---------------------------------------------------------------------------
+# Helper: write error to file
+# ---------------------------------------------------------------------------
+
+def _next_error_index(error_log_dir: str) -> int:
+    import glob
+    existing = glob.glob(os.path.join(error_log_dir, "[0-9]*.txt"))
+    if not existing:
+        return 0
+    indices = []
+    for p in existing:
+        try:
+            indices.append(int(os.path.basename(p).split('_')[0]))
+        except ValueError:
+            pass
+    return max(indices) + 1 if indices else 0
+
+
+def _write_error(error_log_dir: str, tag: str, exc: Exception) -> None:
+    import traceback
+
+    if not error_log_dir:
+        return
+    os.makedirs(error_log_dir, exist_ok=True)
+    idx = _next_error_index(error_log_dir)
+    fpath = os.path.join(error_log_dir, f"{idx}_{tag}.txt")
+    try:
+        with open(fpath, "w") as fh:
+            fh.write(f"Error #{idx}  Tag: {tag}\n\n")
+            traceback.print_exc(file=fh)
+        print(f"[DATASET ERROR] traceback -> {fpath}")
+    except Exception:
+        pass  # never crash inside error handler
+
+
+# ---------------------------------------------------------------------------
+# Core Dataset
+# ---------------------------------------------------------------------------
+
+class IDNetDataset(Dataset):
     """
-    Builds (reference, test, label) triplets from processed/ directory.
+    IDNet ESP dataset.
 
-    Directory layout expected:
-        processed/{doc_type}/real/{split}/img_*.png
-        processed/{doc_type}/forged/{split}/img_*.png
+    Parameters
+    ----------
+    data_dir : str
+        Path to the ``data/raw/ESP`` directory.
+    split : str
+        ``"train"`` or ``"val"``.
+    val_fraction : float
+        Fraction of original filenames reserved for validation (default 0.2).
+    seed : int
+        Random seed used when picking reference images (default 42).
+    image_size : int
+        Target spatial size passed to VisualTransform and SignalTransform.
+    text_image_size : int
+        Target spatial size passed to TextTransform.
+    error_log_dir : str
+        Directory where per-item loading errors are written.  May be "".
     """
 
     def __init__(
         self,
-        processed_dir: str,
-        doc_types: List[str],
-        split: str = "train",       # "train" | "test" | "val" | "all"
-        image_size: int = 224,
-        text_size: int = 384,
-        train_mode: bool = True,
+        data_dir: str,
+        split: str = "train",
+        val_fraction: float = 0.2,
         seed: int = 42,
-    ):
-        self.processed_dir = processed_dir
-        self.doc_types = doc_types
+        image_size: int = 224,
+        text_image_size: int = 384,
+        error_log_dir: str = "",
+    ) -> None:
+        assert split in ("train", "val"), f"split must be 'train' or 'val', got {split!r}"
+        self.data_dir = Path(data_dir)
         self.split = split
-        self.train_mode = train_mode
-        self.rng = random.Random(seed)
+        self.val_fraction = val_fraction
+        self.seed = seed
+        self.error_log_dir = error_log_dir
 
-        # Transforms
-        self.visual_t = VisualTransform(size=image_size, train=train_mode)
-        self.text_t   = TextTransform(size=text_size)
-        self.signal_t = SignalTransform(size=image_size)
+        # Build transforms
+        is_train = split == "train"
+        self.visual_tf = VisualTransform(size=image_size, train=is_train)
+        self.text_tf = TextTransform(size=text_image_size)
+        self.signal_tf = SignalTransform(size=image_size)
 
-        # Build index: list of (real_path, forged_path, doc_type)
-        self.real_paths: List[Tuple[str, str]] = []  # (path, doc_type)
-        self.samples: List[Tuple[str, int, str]] = []  # (path, label, doc_type)
-        self._build_index()
+        # Discover + split original filenames
+        original_dir = self.data_dir / "positive"
+        if not original_dir.is_dir():
+            raise FileNotFoundError(f"Original images directory not found: {original_dir}")
 
-        # Group real images by doc_type for reference selection
-        self.real_by_type: Dict[str, List[str]] = {dt: [] for dt in doc_types}
-        for path, doc_type in self.real_paths:
-            self.real_by_type[doc_type].append(path)
+        all_files: List[str] = sorted(
+            f for f in os.listdir(original_dir)
+            if f.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"))
+        )
+        if len(all_files) == 0:
+            raise ValueError(f"No images found in {original_dir}")
 
-    def _build_index(self) -> None:
-        for doc_type in self.doc_types:
-            splits_to_load = self._resolve_splits(doc_type)
-            for split_dir in splits_to_load:
-                real_dir = os.path.join(
-                    self.processed_dir, doc_type, "real", split_dir
-                )
-                forged_dir = os.path.join(
-                    self.processed_dir, doc_type, "forged", split_dir
-                )
-                if not os.path.isdir(real_dir):
-                    continue
+        n_val = max(1, int(len(all_files) * val_fraction))
+        n_train = len(all_files) - n_val
 
-                real_files = sorted([
-                    f for f in os.listdir(real_dir)
-                    if f.endswith(".png") and not f.startswith(".")
-                ])
-                for fname in real_files:
-                    real_path = os.path.join(real_dir, fname)
-                    self.real_paths.append((real_path, doc_type))
-                    self.samples.append((real_path, 0, doc_type))  # genuine
-
-                    if os.path.isdir(forged_dir):
-                        forged_path = os.path.join(forged_dir, fname)
-                        if os.path.exists(forged_path):
-                            self.samples.append((forged_path, 1, doc_type))  # forged
-
-    def _resolve_splits(self, doc_type: str) -> List[str]:
-        """Map split name to actual subdirectory names."""
-        if self.split == "all":
-            return ["train", "test", "val", "all"]
-        # cord has train/test/val; rvl_cdip has 'all'
-        if doc_type == "cord":
-            mapping = {"train": ["train"], "test": ["test"], "val": ["val"]}
+        if split == "train":
+            self.originals: List[str] = all_files[:n_train]
         else:
-            mapping = {"train": ["all"], "test": ["all"], "val": ["all"]}
-        return mapping.get(self.split, [self.split])
+            self.originals: List[str] = all_files[n_train:]
+
+        # Pre-verify which forgery folders exist
+        self.forgery_dirs: Dict[str, Path] = {}
+        for ft in FORGERY_FOLDERS:
+            fd = self.data_dir / ft
+            if fd.is_dir():
+                self.forgery_dirs[ft] = fd
+            else:
+                log.warning("Forgery folder missing, will skip: %s", fd)
+
+        # Build flat sample list: (original_fname, label, forgery_type, fraud_path)
+        # fraud1-4 use exact filenames matching positive/
+        self.samples: List[Tuple[str, int, str, Optional[Path]]] = []
+        for fname in self.originals:
+            # Genuine
+            self.samples.append((fname, 0, "genuine", None))
+            # One forged sample per forgery folder (exact filename match)
+            for ft, fd in self.forgery_dirs.items():
+                candidate = fd / fname
+                if candidate.exists():
+                    self.samples.append((fname, 1, ft, candidate))
+
+        # Seed-stable RNG for reference selection (reproducible per split)
+        self._rng = random.Random(seed)
+
+        self._print_stats()
+
+    # ------------------------------------------------------------------
+    # Stats
+    # ------------------------------------------------------------------
+
+    def _print_stats(self) -> None:
+        n_genuine = sum(1 for s in self.samples if s[1] == 0)
+        n_forged = sum(1 for s in self.samples if s[1] == 1)
+        per_type: Dict[str, int] = {}
+        for s in self.samples:
+            ft = s[2]
+            per_type[ft] = per_type.get(ft, 0) + 1  # ft assigned above
+        print(
+            f"\n[IDNetDataset] split={self.split!r} | "
+            f"originals={len(self.originals)} | "
+            f"samples={len(self.samples)} "
+            f"(genuine={n_genuine}, forged={n_forged})"
+        )
+        for ft, cnt in sorted(per_type.items()):
+            print(f"  {ft:<30s}: {cnt}")
+        print()
+
+    # ------------------------------------------------------------------
+    # Internal image loader
+    # ------------------------------------------------------------------
+
+    def _load_image(self, path: Path) -> Optional[Image.Image]:
+        try:
+            img = Image.open(path)
+            img.load()          # force decode now, not lazily
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            return img
+        except Exception as exc:
+            tag = str(path).replace(os.sep, "_").replace(":", "")
+            _write_error(self.error_log_dir, tag, exc)
+            return None
+
+    # ------------------------------------------------------------------
+    # Reference selection
+    # ------------------------------------------------------------------
+
+    def _pick_reference(self, exclude_fname: str) -> str:
+        """Return a random original filename that is not exclude_fname."""
+        candidates = [f for f in self.originals if f != exclude_fname]
+        if not candidates:
+            # Edge case: only one original in split — use itself
+            return exclude_fname
+        return self._rng.choice(candidates)
+
+    # ------------------------------------------------------------------
+    # Item loading
+    # ------------------------------------------------------------------
+
+    def _load_sample(self, idx: int) -> Optional[Dict]:
+        fname, label, forgery_type, fraud_path = self.samples[idx]
+
+        # ---- test image ------------------------------------------------
+        if label == 0:
+            test_path = self.data_dir / "positive" / fname
+        else:
+            test_path = fraud_path  # already resolved at init time
+
+        test_img = self._load_image(test_path)
+        if test_img is None:
+            return None
+
+        # ---- reference image ------------------------------------------
+        ref_fname = self._pick_reference(fname)
+        ref_path = self.data_dir / "positive" / ref_fname
+        ref_img = self._load_image(ref_path)
+        if ref_img is None:
+            return None
+
+        # ---- apply transforms -----------------------------------------
+        try:
+            ref_visual = self.visual_tf(ref_img)
+            ref_text = self.text_tf(ref_img)
+            ref_signal = self.signal_tf(ref_img)
+
+            test_visual = self.visual_tf(test_img)
+            test_text = self.text_tf(test_img)
+            test_signal = self.signal_tf(test_img)
+        except Exception as exc:
+            tag = f"transform_{fname}_{forgery_type}"
+            _write_error(self.error_log_dir, tag, exc)
+            return None
+
+        return {
+            "ref_visual": ref_visual,          # (3, H, W)
+            "ref_text": ref_text,              # (3, H_t, W_t)
+            "ref_signal": ref_signal,          # (31, H, W)
+            "test_visual": test_visual,
+            "test_text": test_text,
+            "test_signal": test_signal,
+            "label": torch.tensor(label, dtype=torch.long),
+            "forgery_type": forgery_type,
+        }
+
+    # ------------------------------------------------------------------
+    # Dataset interface
+    # ------------------------------------------------------------------
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> Dict:
-        test_path, label, doc_type = self.samples[idx]
+        result = self._load_sample(idx)
 
-        # Select reference: a REAL image from the same doc_type, different from test_path
-        candidates = [p for p in self.real_by_type.get(doc_type, []) if p != test_path]
-        if not candidates:
-            # fallback: use itself as reference (degenerate but won't crash)
-            candidates = [test_path]
-        ref_path = self.rng.choice(candidates)
+        # On error, walk forward until we find a valid item
+        if result is None:
+            for offset in range(1, len(self.samples)):
+                next_idx = (idx + offset) % len(self.samples)
+                result = self._load_sample(next_idx)
+                if result is not None:
+                    break
 
-        # Load images
-        try:
-            ref_img = Image.open(ref_path).convert("RGB")
-        except Exception:
-            ref_img = Image.new("RGB", (224, 224), (200, 200, 200))
+        if result is None:
+            # Absolute fallback: return zero tensors so the collator doesn't crash
+            log.error("IDNetDataset: could not load ANY valid sample near idx=%d", idx)
+            result = _make_zero_sample()
 
-        try:
-            test_img = Image.open(test_path).convert("RGB")
-        except Exception:
-            test_img = Image.new("RGB", (224, 224), (200, 200, 200))
-
-        return {
-            "ref_visual":  self.visual_t(ref_img),
-            "ref_text":    self.text_t(ref_img),
-            "ref_signal":  self.signal_t(ref_img),
-            "test_visual": self.visual_t(test_img),
-            "test_text":   self.text_t(test_img),
-            "test_signal": self.signal_t(test_img),
-            "label":       torch.tensor(label, dtype=torch.long),
-            "doc_type":    doc_type,
-        }
+        return result
 
 
-class ZeroShotDataset(PairedDocumentDataset):
+# ---------------------------------------------------------------------------
+# Zero-tensor fallback
+# ---------------------------------------------------------------------------
+
+def _make_zero_sample() -> Dict:
+    return {
+        "ref_visual": torch.zeros(3, 224, 224),
+        "ref_text": torch.zeros(3, 384, 384),
+        "ref_signal": torch.zeros(31, 224, 224),
+        "test_visual": torch.zeros(3, 224, 224),
+        "test_text": torch.zeros(3, 384, 384),
+        "test_signal": torch.zeros(31, 224, 224),
+        "label": torch.tensor(0, dtype=torch.long),
+        "forgery_type": "unknown",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Custom collate (handles str forgery_type field)
+# ---------------------------------------------------------------------------
+
+def _collate_fn(batch: List[Dict]) -> Dict:
+    """Collate a list of sample dicts into a batched dict."""
+    keys = batch[0].keys()
+    out: Dict = {}
+    for k in keys:
+        if k == "forgery_type":
+            out[k] = [item[k] for item in batch]
+        else:
+            out[k] = torch.stack([item[k] for item in batch], dim=0)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# build_dataloaders
+# ---------------------------------------------------------------------------
+
+def build_dataloaders(cfg) -> Tuple[DataLoader, DataLoader]:
     """
-    Zero-shot evaluation dataset for held-out document types.
-    Identical to PairedDocumentDataset but always uses train_mode=False
-    and clearly marks samples as zero-shot.
+    Construct train and val DataLoaders from a Config object.
+
+    Parameters
+    ----------
+    cfg : Config
+        Configuration dataclass (see src.utils.config).
+
+    Returns
+    -------
+    train_loader, val_loader : DataLoader
     """
-
-    def __init__(self, processed_dir: str, doc_types: List[str], **kwargs):
-        kwargs["train_mode"] = False
-        super().__init__(processed_dir, doc_types, **kwargs)
-
-    def __getitem__(self, idx: int) -> Dict:
-        sample = super().__getitem__(idx)
-        sample["zero_shot"] = torch.tensor(1, dtype=torch.uint8)
-        return sample
-
-
-def build_dataloaders(cfg, processed_dir: str):
-    """
-    Convenience function to build all DataLoaders from config.
-    Returns: train_loader, val_loader, zeroshot_loader
-    """
-    from torch.utils.data import DataLoader
-
-    train_ds = PairedDocumentDataset(
-        processed_dir=processed_dir,
-        doc_types=cfg.train_doc_types,
-        split="train",
-        image_size=cfg.image_size,
-        text_size=cfg.text_image_size,
-        train_mode=True,
+    common_kwargs = dict(
+        data_dir=cfg.data_raw_dir,
+        val_fraction=cfg.val_fraction,
         seed=cfg.seed,
+        image_size=cfg.image_size,
+        text_image_size=cfg.text_image_size,
+        error_log_dir=cfg.error_log_dir,
     )
-    val_ds = PairedDocumentDataset(
-        processed_dir=processed_dir,
-        doc_types=cfg.train_doc_types,
-        split="test",
-        image_size=cfg.image_size,
-        text_size=cfg.text_image_size,
-        train_mode=False,
-        seed=cfg.seed,
-    )
-    zs_ds = ZeroShotDataset(
-        processed_dir=processed_dir,
-        doc_types=cfg.zeroshot_doc_types,
-        split="all",
-        image_size=cfg.image_size,
-        text_size=cfg.text_image_size,
-        seed=cfg.seed,
+
+    train_ds = IDNetDataset(split="train", **common_kwargs)
+    val_ds = IDNetDataset(split="val", **common_kwargs)
+
+    loader_kwargs = dict(
+        collate_fn=_collate_fn,
+        pin_memory=(cfg.device == "cuda"),
+        persistent_workers=(cfg.num_workers > 0),
     )
 
     train_loader = DataLoader(
@@ -198,22 +381,16 @@ def build_dataloaders(cfg, processed_dir: str):
         batch_size=cfg.stage1_batch_size,
         shuffle=True,
         num_workers=cfg.num_workers,
-        pin_memory=(cfg.device == "cuda"),
         drop_last=True,
+        **loader_kwargs,
     )
     val_loader = DataLoader(
         val_ds,
-        batch_size=cfg.eval_batch_size,
+        batch_size=cfg.stage1_batch_size,
         shuffle=False,
         num_workers=cfg.num_workers,
-        pin_memory=(cfg.device == "cuda"),
-    )
-    zs_loader = DataLoader(
-        zs_ds,
-        batch_size=cfg.eval_batch_size,
-        shuffle=False,
-        num_workers=cfg.num_workers,
-        pin_memory=(cfg.device == "cuda"),
+        drop_last=False,
+        **loader_kwargs,
     )
 
-    return train_loader, val_loader, zs_loader
+    return train_loader, val_loader

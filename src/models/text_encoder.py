@@ -1,4 +1,4 @@
-﻿"""
+"""
 text_encoder.py - Text expert encoder.
 
 Uses microsoft/trocr-small-printed to extract text features, combined
@@ -140,7 +140,7 @@ class TextEncoder(nn.Module):
         # Trainable projection
         self.projector = nn.Sequential(
             nn.Linear(combined_dim, 256),
-            nn.BatchNorm1d(256),
+            nn.LayerNorm(256),
             nn.ReLU(inplace=True),
             nn.Dropout(0.1),
             nn.Linear(256, embed_dim),

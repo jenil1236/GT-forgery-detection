@@ -1,4 +1,4 @@
-﻿"""
+"""
 signal_encoder.py - Signal expert encoder.
 
 Processes 31-channel input (30 SRM filters + 1 FFT magnitude).
@@ -97,7 +97,7 @@ class SignalEncoder(nn.Module):
 
         self.projector = nn.Sequential(
             nn.Linear(256, 256),
-            nn.BatchNorm1d(256),
+            nn.LayerNorm(256),
             nn.ReLU(inplace=True),
             nn.Dropout(0.1),
             nn.Linear(256, embed_dim),

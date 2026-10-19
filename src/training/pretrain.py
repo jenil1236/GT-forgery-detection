@@ -1,4 +1,4 @@
-﻿"""
+"""
 pretrain.py - Stage 1: metric learning pretraining of encoders.
 
 Trains visual, text, and signal encoders with InfoNCE + contrastive alignment.
@@ -13,6 +13,8 @@ the model learns HOW to compare, not WHAT a specific document looks like.
 from __future__ import annotations
 import os
 import time
+import glob
+import traceback
 from typing import Dict, Optional, Tuple
 
 import torch
@@ -28,6 +30,34 @@ from src.utils.checkpoint import (
     checkpoint_filename, find_best_checkpoint
 )
 from src.utils.logger import Logger
+
+
+def _next_error_index(error_log_dir: str) -> int:
+    existing = glob.glob(os.path.join(error_log_dir, "[0-9]*.txt"))
+    if not existing:
+        return 0
+    indices = []
+    for p in existing:
+        try:
+            indices.append(int(os.path.basename(p).split('_')[0]))
+        except ValueError:
+            pass
+    return max(indices) + 1 if indices else 0
+
+
+def _write_error_file(error_log_dir: str, tag: str) -> None:
+    """Write traceback to error_log_dir/<N>_<tag>.txt (N auto-increments)."""
+    if not error_log_dir:
+        return
+    os.makedirs(error_log_dir, exist_ok=True)
+    idx = _next_error_index(error_log_dir)
+    fpath = os.path.join(error_log_dir, f"{idx}_{tag}.txt")
+    try:
+        with open(fpath, "w") as fh:
+            traceback.print_exc(file=fh)
+        print(f"[ERROR] Traceback saved -> {fpath}")
+    except Exception:
+        pass
 
 
 class Stage1Trainer:
@@ -50,6 +80,7 @@ class Stage1Trainer:
         cfg,
         logger: Logger,
         device: str = "cuda",
+        error_log_dir: str = "",
     ):
         self.visual_enc = visual_encoder.to(device)
         self.text_enc   = text_encoder.to(device)
@@ -57,6 +88,7 @@ class Stage1Trainer:
         self.cfg = cfg
         self.logger = logger
         self.device = device
+        self.error_log_dir = error_log_dir
 
         self.infonce = InfoNCELoss(temperature=cfg.infonce_temperature)
         self.alignment = ContrastiveAlignmentLoss(margin=1.0)
@@ -79,7 +111,6 @@ class Stage1Trainer:
             eta_min=cfg.stage1_lr * 0.01,
         )
 
-        # FIX: use torch.amp instead of deprecated torch.cuda.amp
         use_amp = (device == "cuda") and cfg.mixed_precision
         self.scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
         self._use_amp = use_amp
@@ -114,8 +145,8 @@ class Stage1Trainer:
             eT = encoder(test)
             return eR, eT
 
-        # FIX: torch.amp.autocast requires explicit device_type argument
-        with torch.amp.autocast("cuda", enabled=self._use_amp):
+        _dev_type = "cuda" if self.device == "cuda" else "cpu"
+        with torch.amp.autocast(_dev_type, enabled=self._use_amp):
             eR_v, eT_v = enc_pair(self.visual_enc, "ref_visual", "test_visual")
             eR_t, eT_t = enc_pair(self.text_enc, "ref_text", "test_text")
             eR_s, eT_s = enc_pair(self.signal_enc, "ref_signal", "test_signal")
@@ -135,9 +166,11 @@ class Stage1Trainer:
         frg_mask = (labels == 1)
 
         if gen_mask.sum() == 0 or frg_mask.sum() == 0:
+            # Degenerate batch: all same class.
+            # Use pairwise distance so the loss is always differentiable.
             dist = torch.nn.functional.pairwise_distance(eR, eT)
-            loss = dist[gen_mask].mean() if gen_mask.sum() > 0 else torch.tensor(0.0, device=self.device)
-            return loss, {"loss": loss.item()}
+            loss = dist.mean()  # always has grad_fn since eR/eT come from encoders
+            return loss, {"loss_total": loss.item(), "loss_infonce": 0.0, "loss_align": 0.0, "loss_triplet": 0.0}
 
         eR_gen = eR[gen_mask]
         eT_gen = eT[gen_mask]
@@ -147,7 +180,7 @@ class Stage1Trainer:
         if n > 0:
             l_infonce = self.infonce(eR_gen[:n], eT_gen[:n], eT_frg[:n])
         else:
-            l_infonce = torch.tensor(0.0, device=self.device)
+            l_infonce = (eR * 0).sum()  # zero but differentiable
 
         l_align = self.alignment(eR, eT, labels)
 
@@ -155,7 +188,7 @@ class Stage1Trainer:
         if n_triplet > 0:
             l_triplet = self.triplet(eR_gen[:n_triplet], eT_gen[:n_triplet], eT_frg[:n_triplet])
         else:
-            l_triplet = torch.tensor(0.0, device=self.device)
+            l_triplet = (eR * 0).sum()  # zero but differentiable
 
         loss = l_infonce + self.cfg.contrastive_alpha * l_align + 0.1 * l_triplet
 
@@ -168,6 +201,14 @@ class Stage1Trainer:
         return loss, metrics
 
     def train_epoch(self, loader: DataLoader, epoch: int) -> Dict:
+        try:
+            return self._train_epoch_impl(loader, epoch)
+        except Exception:
+            tag = f"error_stage1_epoch{epoch}"
+            _write_error_file(self.error_log_dir, tag)
+            raise
+
+    def _train_epoch_impl(self, loader: DataLoader, epoch: int) -> Dict:
         self.visual_enc.train()
         self.text_enc.train()
         self.signal_enc.train()
@@ -176,13 +217,13 @@ class Stage1Trainer:
         total_sep = 0.0
         n_batches = 0
 
-        for step, batch in enumerate(
-            self.logger.progress(loader, desc=f"  Stage1 Epoch {epoch}", leave=False)
-        ):
+        n_batches_total = len(loader)
+        log_interval = max(1, n_batches_total // 5)  # log ~5 times per epoch
+        for step, batch in enumerate(loader):
             self.optimizer.zero_grad(set_to_none=True)
             labels = batch["label"].to(self.device)
 
-            with torch.amp.autocast("cuda", enabled=self._use_amp):
+            with torch.amp.autocast(_dev_type if hasattr(self, "_dev_type") else ("cuda" if self.device == "cuda" else "cpu"), enabled=self._use_amp):
                 (eR_v, eT_v), (eR_t, eT_t), (eR_s, eT_s) = self._forward_encoders(batch)
                 l_v, m_v = self._compute_loss(eR_v, eT_v, labels)
                 l_t, m_t = self._compute_loss(eR_t, eT_t, labels)
@@ -211,7 +252,17 @@ class Stage1Trainer:
             total_loss += loss.item()
             n_batches += 1
 
-            if step % self.cfg.log_every_n_steps == 0:
+            if step % log_interval == 0 or step == n_batches_total - 1:
+                pct = 100.0 * (step + 1) / n_batches_total
+                avg_loss = total_loss / max(n_batches, 1)
+                self.logger.info(
+                    f"  [S1 Ep {epoch:02d}] "
+                    f"Batch {step+1:04d}/{n_batches_total} ({pct:5.1f}%) | "
+                    f"loss={loss.item():.4f} (avg={avg_loss:.4f}) | "
+                    f"v={m_v['loss_total']:.4f} "
+                    f"t={m_t['loss_total']:.4f} "
+                    f"s={m_s['loss_total']:.4f}"
+                )
                 self.logger.log_step(
                     epoch=epoch, step=step,
                     loss_visual=m_v["loss_total"],
@@ -230,15 +281,25 @@ class Stage1Trainer:
 
     @torch.no_grad()
     def validate(self, loader: DataLoader, epoch: int) -> Dict:
+        try:
+            return self._validate_impl(loader, epoch)
+        except Exception:
+            tag = f"error_stage1_val_epoch{epoch}"
+            _write_error_file(self.error_log_dir, tag)
+            raise
+
+    def _validate_impl(self, loader: DataLoader, epoch: int) -> Dict:
         self.visual_enc.eval()
         self.text_enc.eval()
         self.signal_enc.eval()
+        # In eval mode BatchNorm uses running stats -> works with any batch size including 1
 
         total_loss = 0.0
         total_sep = 0.0
         n_batches = 0
 
-        for batch in self.logger.progress(loader, desc=f"  Stage1 Val {epoch}", leave=False):
+        n_val_total = len(loader)
+        for val_step, batch in enumerate(loader):
             labels = batch["label"].to(self.device)
             (eR_v, eT_v), (eR_t, eT_t), (eR_s, eT_s) = self._forward_encoders(batch)
             l_v, _ = self._compute_loss(eR_v, eT_v, labels)
@@ -255,6 +316,12 @@ class Stage1Trainer:
                 )
                 total_sep += sep
             n_batches += 1
+            if val_step == n_val_total - 1:
+                self.logger.info(
+                    f"  [S1 Ep {epoch:02d}] Val done | "
+                    f"val_loss={total_loss/max(n_batches,1):.4f} | "
+                    f"sep_ratio={total_sep/max(n_batches,1):.3f}"
+                )
 
         return {
             "val_loss": total_loss / max(n_batches, 1),
@@ -318,7 +385,14 @@ class Stage1Trainer:
             self.logger.info("Stage 1 already complete, skipping.")
             return
 
-        for epoch in range(self.start_epoch, self.cfg.stage1_epochs):
+        from tqdm import tqdm as _tqdm
+        epoch_bar = _tqdm(
+            range(self.start_epoch, self.cfg.stage1_epochs),
+            desc="Stage1", unit="epoch", dynamic_ncols=True,
+            initial=self.start_epoch,
+            total=self.cfg.stage1_epochs,
+        )
+        for epoch in epoch_bar:
             t0 = time.time()
             train_metrics = self.train_epoch(train_loader, epoch)
             val_metrics = self.validate(val_loader, epoch)
@@ -332,8 +406,20 @@ class Stage1Trainer:
 
             if (epoch + 1) % self.cfg.checkpoint_every_n_epochs == 0 or is_best:
                 self.save_encoders(epoch, epoch_metrics, is_best=is_best)
+                ckpt_tag = "BEST MODEL" if is_best else "checkpoint"
+                self.logger.info(
+                    f"  >>> [{ckpt_tag}] Epoch {epoch:03d} saved | "
+                    f"sep_ratio={val_metrics['val_separation_ratio']:.4f} "
+                    f"(best so far={self.best_sep_ratio:.4f}) | "
+                    f"path={self.cfg.checkpoint_dir}"
+                )
 
             elapsed = time.time() - t0
+            epoch_bar.set_postfix(
+                loss=f"{train_metrics['train_loss']:.4f}",
+                sep=f"{val_metrics['val_separation_ratio']:.3f}",
+                best="*" if is_best else "",
+            )
             self.logger.info(
                 f"Stage1 Epoch {epoch:03d}/{self.cfg.stage1_epochs-1} | "
                 f"loss={train_metrics['train_loss']:.4f} | "

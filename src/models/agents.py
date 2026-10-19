@@ -1,4 +1,4 @@
-﻿"""
+"""
 agents.py - Expert agent wrappers with belief reporting.
 
 Each ExpertAgent:
@@ -89,6 +89,17 @@ class ExpertAgent(nn.Module):
         belief = self.belief_head(trunk_out)  # (B, 1)
 
         action_logits = self.action_head(trunk_out)  # (B, 3)
+        # NaN guard: replace NaN logits with zeros to avoid Categorical crash
+        # Root cause is usually NaN embeddings from encoder; log it clearly
+        if torch.isnan(action_logits).any():
+            import warnings
+            warnings.warn(
+                f"{self.modality} expert: NaN in action_logits. "
+                f"eR_nan={torch.isnan(eR).any().item()}, "
+                f"eT_nan={torch.isnan(eT).any().item()}, "
+                f"trunk_nan={torch.isnan(trunk_out).any().item()}"
+            )
+            action_logits = torch.zeros_like(action_logits)  # uniform fallback
         action_dist = torch.distributions.Categorical(logits=action_logits)
         action = action_dist.sample()  # (B,)
         log_prob = action_dist.log_prob(action)  # (B,)

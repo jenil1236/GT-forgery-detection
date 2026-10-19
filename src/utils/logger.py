@@ -113,8 +113,9 @@ class Logger:
 
     def progress(self, iterable, desc: str = "", total: Optional[int] = None, **kwargs):
         """Wrap an iterable in a tqdm progress bar."""
+        kwargs.setdefault("leave", True)  # caller can override with leave=False
         return tqdm(iterable, desc=desc, total=total,
-                    dynamic_ncols=True, leave=True, **kwargs)
+                    dynamic_ncols=True, **kwargs)
 
     def close(self) -> None:
         self._metrics_fh.flush()

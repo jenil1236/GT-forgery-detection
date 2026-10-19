@@ -1,21 +1,17 @@
-﻿"""
+"""
 train.py - Main training entry point.
 
-Usage:
-    python src/train.py                  # fresh run
-    python src/train.py --resume         # auto-resume from latest checkpoint
-    python src/train.py --skip_stage1    # skip encoder pretraining
-    python src/train.py --eval_only      # evaluation only (requires stage2 checkpoint)
-
 Pipeline:
-    1. Download datasets (CORD-v2, RVL-CDIP subset)
-    2. Generate synthetic forgeries
-    3. Stage 1: metric learning for visual, text, signal encoders
-    4. Stage 2: MAPPO cooperative multi-agent training
-    5. Evaluation: seen types, zero-shot, Shapley values, robustness
+  1. Parse args + build Config
+  2. Setup logger, seed, print GPU info
+  3. Build IDNetDataset dataloaders
+  4. Build model system (encoders + agents + judge)
+  5. Stage 1: metric learning pretraining
+  6. Stage 2: MAPPO cooperative training
 """
 
 from __future__ import annotations
+
 import argparse
 import os
 import random
@@ -24,15 +20,48 @@ import sys
 import numpy as np
 import torch
 
+# Ensure project root is on sys.path so 'src.*' imports work
+# regardless of where python is invoked from
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
-def _set_hf_home(project_root: str) -> None:
-    cache = os.path.join(project_root, "data", "models_cache")
-    os.makedirs(cache, exist_ok=True)
-    os.environ["HF_HOME"] = cache
-    os.environ["TRANSFORMERS_CACHE"] = os.path.join(cache, "transformers")
-    os.environ["HF_DATASETS_CACHE"] = os.path.join(cache, "datasets")
-    print(f"HF_HOME set to: {cache}")
 
+# ---------------------------------------------------------------------------
+# Error logging helper
+# ---------------------------------------------------------------------------
+
+def _next_error_index(error_dir: str) -> int:
+    """Auto-increment: returns 0, 1, 2 ... based on files already in error_dir."""
+    import glob
+    existing = glob.glob(os.path.join(error_dir, "[0-9]*.txt"))
+    if not existing:
+        return 0
+    indices = []
+    for p in existing:
+        base = os.path.basename(p)  # e.g. '3_stage1.txt'
+        try:
+            indices.append(int(base.split('_')[0]))
+        except ValueError:
+            pass
+    return max(indices) + 1 if indices else 0
+
+
+def _log_error(error_dir: str, step: str, run_id: str, exc: Exception) -> None:
+    import traceback
+
+    os.makedirs(error_dir, exist_ok=True)
+    idx = _next_error_index(error_dir)
+    fpath = os.path.join(error_dir, f"{idx}_{step}.txt")
+    with open(fpath, "w") as fh:
+        fh.write(f"Error #{idx}\nStep: {step}\nRun ID: {run_id}\n\n")
+        traceback.print_exc(file=fh)
+    print(f"[ERROR] Traceback saved -> {fpath}")
+
+
+# ---------------------------------------------------------------------------
+# Seed
+# ---------------------------------------------------------------------------
 
 def _set_seed(seed: int) -> None:
     random.seed(seed)
@@ -40,216 +69,257 @@ def _set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
 
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="GT Forgery Detection Training")
-    p.add_argument("--resume", action="store_true",
-                   help="Auto-resume from latest checkpoint")
-    p.add_argument("--project_root", default=".",
-                   help="Project root directory")
-    p.add_argument("--skip_download", action="store_true")
-    p.add_argument("--skip_forge", action="store_true")
-    p.add_argument("--skip_stage1", action="store_true")
-    p.add_argument("--skip_stage2", action="store_true")
-    p.add_argument("--eval_only", action="store_true")
-    p.add_argument("--device", default=None,
-                   help="Override device (cuda/cpu)")
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--note", default="", help="Run note for logging")
-    return p.parse_args()
+# ---------------------------------------------------------------------------
+# GPU info
+# ---------------------------------------------------------------------------
+
+def _print_gpu_info(device: str) -> None:
+    if device == "cuda" and torch.cuda.is_available():
+        props = torch.cuda.get_device_properties(0)
+        vram_gb = round(props.total_memory / 1e9, 1)
+        print(f"[GPU] {props.name}  |  VRAM: {vram_gb} GB  |  "
+              f"CUDA {torch.version.cuda}")
+    else:
+        print("[WARNING] Running on CPU — training will be very slow.")
 
 
-def build_system(cfg, device: str):
-    """Instantiate all model components from config."""
+# ---------------------------------------------------------------------------
+# Model system builder
+# ---------------------------------------------------------------------------
+
+def build_system(cfg, logger):
+    """Instantiate all model components and return them."""
     from src.models.visual_encoder import VisualEncoder
     from src.models.text_encoder import TextEncoder
     from src.models.signal_encoder import SignalEncoder
     from src.models.agents import ExpertAgent, MultiExpertSystem
     from src.models.judge import LogOddsJudge
 
+    logger.info("Building model system …")
+
     visual_enc = VisualEncoder(embed_dim=cfg.embedding_dim)
-    text_enc   = TextEncoder(
+    text_enc = TextEncoder(
         embed_dim=cfg.embedding_dim,
-        model_name=cfg.trocr_model_name,
         features_cache_dir=cfg.features_cache_dir,
         models_cache_dir=cfg.models_cache_dir,
     )
-    signal_enc = SignalEncoder(embed_dim=cfg.embedding_dim)
+    signal_enc = SignalEncoder(
+        embed_dim=cfg.embedding_dim,
+        in_channels=cfg.signal_channels,
+    )
 
     agents = {
-        "visual": ExpertAgent(visual_enc, "visual", cfg.embedding_dim, cfg.expert_belief_hidden),
-        "text":   ExpertAgent(text_enc,   "text",   cfg.embedding_dim, cfg.expert_belief_hidden),
-        "signal": ExpertAgent(signal_enc, "signal", cfg.embedding_dim, cfg.expert_belief_hidden),
+        "visual": ExpertAgent(
+            encoder=visual_enc,
+            modality="visual",
+            embed_dim=cfg.embedding_dim,
+            belief_hidden=cfg.expert_belief_hidden,
+        ),
+        "text": ExpertAgent(
+            encoder=text_enc,
+            modality="text",
+            embed_dim=cfg.embedding_dim,
+            belief_hidden=cfg.expert_belief_hidden,
+        ),
+        "signal": ExpertAgent(
+            encoder=signal_enc,
+            modality="signal",
+            embed_dim=cfg.embedding_dim,
+            belief_hidden=cfg.expert_belief_hidden,
+        ),
     }
     expert_system = MultiExpertSystem(agents)
+
     judge = LogOddsJudge(
         n_experts=cfg.n_experts,
         hidden_dim=cfg.judge_hidden_dim,
         query_cost=cfg.query_cost,
     )
 
+    # Parameter count
+    def _n_params(m):
+        return sum(p.numel() for p in m.parameters() if p.requires_grad)
+
+    logger.info(
+        f"  VisualEncoder   params: {_n_params(visual_enc):,}"
+    )
+    logger.info(
+        f"  TextEncoder     params: {_n_params(text_enc):,}"
+    )
+    logger.info(
+        f"  SignalEncoder   params: {_n_params(signal_enc):,}"
+    )
+    logger.info(
+        f"  ExpertSystem    params: {_n_params(expert_system):,}"
+    )
+    logger.info(
+        f"  LogOddsJudge    params: {_n_params(judge):,}"
+    )
+
     return visual_enc, text_enc, signal_enc, expert_system, judge
 
 
-def main():
-    args = parse_args()
-    project_root = os.path.abspath(args.project_root)
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
-    # Must set HF_HOME before any HF imports
-    _set_hf_home(project_root)
+def main() -> None:
+    parser = argparse.ArgumentParser(description="GT Forgery Detection — Training")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from the latest checkpoint.")
+    parser.add_argument("--project_root", type=str, default=".",
+                        help="Root directory of the project (default: current dir).")
+    parser.add_argument("--device", type=str, default=None,
+                        help="Override device: 'cuda' or 'cpu'.")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Global random seed (default: 42).")
+    parser.add_argument("--smoke_test", action="store_true",
+                        help="Run a minimal smoke test (2 stage-1 epochs, 4 stage-2 epochs).")
+    parser.add_argument("--note", type=str, default="",
+                        help="Free-text note attached to this run.")
+    args = parser.parse_args()
 
-    # Now safe to import HF-dependent modules
+    # ------------------------------------------------------------------
+    # 1. Config
+    # ------------------------------------------------------------------
     from src.utils.config import Config
     from src.utils.logger import Logger, make_run_id
-    from src.utils.checkpoint import find_latest_checkpoint
 
-    # ── Config ───────────────────────────────────────────────────────────────
-    cfg = Config(project_root=project_root)
-    cfg.resolve_paths(project_root)
+    cfg = Config(
+        smoke_test=args.smoke_test,
+        run_note=args.note,
+        seed=args.seed,
+    )
+    cfg.resolve_paths(args.project_root)
+
+    if args.device is not None:
+        # Override after __post_init__ so the user's choice wins (then re-check CUDA)
+        if args.device == "cuda" and not torch.cuda.is_available():
+            print("[WARNING] --device cuda requested but CUDA unavailable; falling back to cpu.")
+            cfg.device = "cpu"
+        else:
+            cfg.device = args.device
+
     cfg.run_id = make_run_id()
-    cfg.run_note = args.note
-    if args.device:
-        cfg.device = args.device
-    if args.skip_download:  cfg.skip_download = True
-    if args.skip_forge:     cfg.skip_forge = True
-    if args.skip_stage1:    cfg.skip_stage1 = True
-    if args.skip_stage2:    cfg.skip_stage2 = True
     cfg.ensure_dirs()
-    cfg.save(os.path.join(cfg.output_dir, "config.json"))
 
-    # ── Logger ───────────────────────────────────────────────────────────────
+    # Persist config for reproducibility
+    config_path = os.path.join(cfg.output_dir, f"config_{cfg.run_id}.json")
+    cfg.save(config_path)
+
+    # ------------------------------------------------------------------
+    # 2. Logger
+    # ------------------------------------------------------------------
     log_file = os.path.join(cfg.logs_dir, f"{cfg.run_id}.log")
     logger = Logger(
         metrics_dir=cfg.metrics_dir,
         run_id=cfg.run_id,
         log_file=log_file,
     )
-
-    _set_seed(args.seed)
-
-    # ── Print header ─────────────────────────────────────────────────────────
-    logger.info("="*60)
-    logger.info("  Game-Theoretic Reference-Conditioned Forgery Detection")
-    logger.info("="*60)
-    logger.info(f"  Run ID:      {cfg.run_id}")
-    logger.info(f"  Project root:{project_root}")
-    logger.info(f"  Device:      {cfg.device}")
-    logger.info(f"  Resume:      {args.resume}")
-
-    # GPU info
-    if torch.cuda.is_available():
-        gpu = torch.cuda.get_device_properties(0)
-        logger.info(f"  GPU:         {gpu.name}")
-        logger.info(f"  VRAM:        {gpu.total_memory / 1e9:.1f} GB")
-    else:
-        logger.info("  GPU:         Not available — running on CPU")
-
+    logger.info(f"Run ID     : {cfg.run_id}")
+    logger.info(f"Note       : {cfg.run_note or '(none)'}")
+    logger.info(f"Project    : {cfg.project_root}")
+    logger.info(f"Device     : {cfg.device}")
+    logger.info(f"Smoke test : {cfg.smoke_test}")
+    logger.info(f"Config     : {config_path}")
     logger.log_config(cfg.to_dict())
 
-    # ── Step 1: Download datasets ─────────────────────────────────────────────
-    if not cfg.skip_download:
-        logger.info("\n[STEP 1/5] Downloading datasets ...")
-        from src.data.download import download_cord, download_rvl_cdip
-        raw_dir = cfg.raw_data_dir
-        download_cord(raw_dir, max_samples=cfg.cord_max_samples, seed=args.seed)
-        download_rvl_cdip(
-            raw_dir,
-            train_classes=["letter", "form", "invoice", "budget", "memo", "resume"],
-            zeroshot_classes=["advertisement", "scientific_report"],
-            samples_per_class_train=cfg.rvl_samples_per_class_train,
-            samples_per_class_zeroshot=cfg.rvl_samples_per_class_test,
-            seed=args.seed,
+    # ------------------------------------------------------------------
+    # 3. Seed + GPU info
+    # ------------------------------------------------------------------
+    _set_seed(cfg.seed)
+    _print_gpu_info(cfg.device)
+
+    # ------------------------------------------------------------------
+    # 4. Dataloaders
+    # ------------------------------------------------------------------
+    logger.info("Building dataloaders …")
+    try:
+        from src.data.dataset import build_dataloaders
+        train_loader, val_loader = build_dataloaders(cfg)
+        logger.info(
+            f"  Train batches: {len(train_loader)}  "
+            f"Val batches: {len(val_loader)}"
         )
+    except Exception as exc:
+        _log_error(cfg.error_log_dir, "build_dataloaders", cfg.run_id, exc)
+        raise
+
+    # ------------------------------------------------------------------
+    # 5. Model system
+    # ------------------------------------------------------------------
+    try:
+        visual_enc, text_enc, signal_enc, expert_system, judge = build_system(cfg, logger)
+    except Exception as exc:
+        _log_error(cfg.error_log_dir, "build_system", cfg.run_id, exc)
+        raise
+
+    # ------------------------------------------------------------------
+    # 6. Stage 1: metric learning pretraining
+    # ------------------------------------------------------------------
+    if not cfg.skip_stage1:
+        logger.info("Starting Stage 1 …")
+        try:
+            from src.training.pretrain import Stage1Trainer
+            stage1 = Stage1Trainer(
+                visual_encoder=visual_enc,
+                text_encoder=text_enc,
+                signal_encoder=signal_enc,
+                cfg=cfg,
+                logger=logger,
+                device=cfg.device,
+                error_log_dir=cfg.error_log_dir,
+            )
+            stage1.run(train_loader, val_loader, resume=args.resume)
+        except Exception as exc:
+            _log_error(cfg.error_log_dir, "stage1_training", cfg.run_id, exc)
+            raise
     else:
-        logger.info("[STEP 1/5] Download skipped.")
+        logger.info("Stage 1 skipped (--skip_stage1 or cfg.skip_stage1=True).")
 
-    # ── Step 2: Generate forgeries ───────────────────────────────────────────
-    if not cfg.skip_forge:
-        logger.info("\n[STEP 2/5] Generating synthetic forgeries ...")
-        from src.data.forge import run_forge_pipeline
-        all_types = cfg.train_doc_types + cfg.zeroshot_doc_types
-        stats = run_forge_pipeline(
-            cfg.raw_data_dir, cfg.processed_data_dir,
-            doc_types=all_types, seed=args.seed,
-        )
-        logger.info(f"  Forgery stats: {stats}")
+    # ------------------------------------------------------------------
+    # 7. Stage 2: MAPPO cooperative training
+    # ------------------------------------------------------------------
+    if not cfg.skip_stage2:
+        # Sanitise weights before Stage 2: GradScaler can leave NaN in fp16 params
+        _nan_count = 0
+        for pname, param in expert_system.named_parameters():
+            if torch.isnan(param.data).any() or torch.isinf(param.data).any():
+                torch.nn.init.normal_(param.data, mean=0.0, std=0.01)
+                _nan_count += 1
+        if _nan_count:
+            logger.info(f"  WARNING: reset {_nan_count} NaN/Inf param tensors before Stage 2")
+        expert_system = expert_system.float()
+        judge = judge.float()
+        logger.info("Starting Stage 2 …")
+        try:
+            from src.training.marl import MAPPOTrainer
+            stage2 = MAPPOTrainer(
+                expert_system=expert_system,
+                judge=judge,
+                cfg=cfg,
+                logger=logger,
+                device=cfg.device,
+                error_log_dir=cfg.error_log_dir,
+            )
+            stage2.run(train_loader, val_loader, resume=args.resume)
+        except Exception as exc:
+            _log_error(cfg.error_log_dir, "stage2_training", cfg.run_id, exc)
+            raise
     else:
-        logger.info("[STEP 2/5] Forgery generation skipped.")
+        logger.info("Stage 2 skipped (--skip_stage2 or cfg.skip_stage2=True).")
 
-    # ── Build datasets ────────────────────────────────────────────────────────
-    logger.info("\nBuilding DataLoaders ...")
-    from src.data.dataset import build_dataloaders
-    train_loader, val_loader, zs_loader = build_dataloaders(cfg, cfg.processed_data_dir)
-    logger.info(f"  Train samples:     {len(train_loader.dataset)}")
-    logger.info(f"  Val samples:       {len(val_loader.dataset)}")
-    logger.info(f"  Zero-shot samples: {len(zs_loader.dataset)}")
-
-    # ── Build system ──────────────────────────────────────────────────────────
-    logger.info("\nBuilding model system ...")
-    visual_enc, text_enc, signal_enc, expert_system, judge = build_system(cfg, cfg.device)
-
-    n_params = sum(p.numel() for p in expert_system.parameters() if p.requires_grad)
-    n_params += sum(p.numel() for p in judge.parameters() if p.requires_grad)
-    logger.info(f"  Trainable parameters: {n_params:,}")
-
-    # ── Step 3: Stage 1 pretraining ───────────────────────────────────────────
-    if not cfg.skip_stage1 and not args.eval_only:
-        logger.info("\n[STEP 3/5] Stage 1: Encoder pretraining ...")
-        from src.training.pretrain import Stage1Trainer
-        trainer1 = Stage1Trainer(
-            visual_enc, text_enc, signal_enc,
-            cfg, logger, device=cfg.device,
-        )
-        trainer1.run(train_loader, val_loader, resume=args.resume)
-    else:
-        logger.info("[STEP 3/5] Stage 1 skipped — loading best checkpoints ...")
-        from src.utils.checkpoint import find_best_checkpoint, load_model_weights
-        for name, model in [("stage1_visual", visual_enc), ("stage1_text", text_enc), ("stage1_signal", signal_enc)]:
-            best = find_best_checkpoint(cfg.checkpoint_dir, name)
-            if best:
-                load_model_weights(model, best, device=cfg.device)
-                logger.info(f"  Loaded {name} from {best}")
-
-    # ── Step 4: Stage 2 MARL ─────────────────────────────────────────────────
-    if not cfg.skip_stage2 and not args.eval_only:
-        logger.info("\n[STEP 4/5] Stage 2: MAPPO Multi-Agent Training ...")
-        from src.training.marl import MAPPOTrainer
-        trainer2 = MAPPOTrainer(
-            expert_system, judge,
-            cfg, logger, device=cfg.device,
-        )
-        trainer2.run(train_loader, val_loader, resume=args.resume)
-    else:
-        logger.info("[STEP 4/5] Stage 2 skipped — loading best checkpoint ...")
-        from src.utils.checkpoint import find_best_checkpoint, load_checkpoint
-        best = find_best_checkpoint(cfg.checkpoint_dir, "stage2")
-        if best:
-            state = load_checkpoint(best, device=cfg.device)
-            ms = state.get("model_state", {})
-            if "experts" in ms:
-                expert_system.load_state_dict(ms["experts"])
-            if "judge" in ms:
-                judge.load_state_dict(ms["judge"])
-            logger.info(f"  Loaded stage2 from {best}")
-
-    # ── Step 5: Evaluation ────────────────────────────────────────────────────
-    logger.info("\n[STEP 5/5] Final Evaluation ...")
-    from src.evaluation.evaluate import Evaluator
-    evaluator = Evaluator(expert_system, judge, cfg, logger, device=cfg.device)
-    results = evaluator.run_full_evaluation(val_loader, zs_loader)
-
-    # Final summary
-    logger.info("\n" + "="*60)
-    logger.info("TRAINING COMPLETE")
-    logger.info(f"  Seen AUC:       {results['seen'].get('auc', 0):.4f}")
-    logger.info(f"  Zero-shot AUC:  {results['zero_shot'].get('auc', 0):.4f}")
-    logger.info(f"  Seen EER:       {results['seen'].get('eer', 0):.4f}")
-    logger.info(f"  Private code:   {results['robustness'].get('private_code_detected', False)}")
-    logger.info("="*60)
-
+    # ------------------------------------------------------------------
+    # 8. Done
+    # ------------------------------------------------------------------
+    logger.info("=" * 60)
+    logger.info("Training complete.")
+    logger.info(f"  Checkpoints : {cfg.checkpoint_dir}")
+    logger.info(f"  Metrics     : {cfg.metrics_dir}")
+    logger.info(f"  Errors      : {cfg.error_log_dir}")
+    logger.info("=" * 60)
     logger.close()
 
 

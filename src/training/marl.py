@@ -1,5 +1,20 @@
+"""
+marl.py - Stage 2: Multi-Agent PPO (MAPPO) cooperative training.
+
+Alternating schedule (prevents private code collapse):
+  Phase A (judge):  freeze experts, train judge 5 epochs
+  Phase B (expert): freeze judge,  train experts 5 epochs
+  Repeat for 5 cycles (50 total epochs).
+
+Expert credit: Market Scoring Rule
+Judge credit:  Proper Scoring Rule with query cost
+"""
+
 from __future__ import annotations
+import os
 import time
+import glob
+import traceback
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -15,6 +30,34 @@ from src.utils.checkpoint import save_checkpoint, find_latest_checkpoint, checkp
 from src.utils.logger import Logger
 
 
+def _next_error_index(error_log_dir: str) -> int:
+    existing = glob.glob(os.path.join(error_log_dir, "[0-9]*.txt"))
+    if not existing:
+        return 0
+    indices = []
+    for p in existing:
+        try:
+            indices.append(int(os.path.basename(p).split('_')[0]))
+        except ValueError:
+            pass
+    return max(indices) + 1 if indices else 0
+
+
+def _write_error_file(error_log_dir: str, tag: str) -> None:
+    """Write traceback to error_log_dir/<N>_<tag>.txt (N auto-increments)."""
+    if not error_log_dir:
+        return
+    os.makedirs(error_log_dir, exist_ok=True)
+    idx = _next_error_index(error_log_dir)
+    fpath = os.path.join(error_log_dir, f"{idx}_{tag}.txt")
+    try:
+        with open(fpath, "w") as fh:
+            traceback.print_exc(file=fh)
+        print(f"[ERROR] Traceback saved -> {fpath}")
+    except Exception:
+        pass
+
+
 @dataclass
 class Transition:
     obs_lambda: torch.Tensor
@@ -25,7 +68,7 @@ class Transition:
     value: torch.Tensor
     done: torch.Tensor
     step: int
-    available_mask: torch.Tensor = None  # FIX: store mask for PPO recomputation
+    available_mask: torch.Tensor = None  # stored for PPO recomputation
 
 
 @dataclass
@@ -39,22 +82,23 @@ class EpisodeBuffer:
 class MAPPOTrainer:
     """
     Multi-Agent PPO trainer with centralised critic (CTDE).
-
-    Alternating schedule (prevents private code collapse):
-      Phase A (judge): freeze experts, train judge 5 epochs
-      Phase B (expert): freeze judge, train experts 5 epochs
-      Repeat for 5 cycles (50 total epochs).
-
-    Expert credit: Market Scoring Rule
-    Judge credit:  Proper Scoring Rule with query cost
     """
 
-    def __init__(self, expert_system, judge, cfg, logger, device="cuda"):
+    def __init__(
+        self,
+        expert_system,
+        judge,
+        cfg,
+        logger: Logger,
+        device: str = "cuda",
+        error_log_dir: str = "",
+    ):
         self.expert_system = expert_system.to(device)
         self.judge = judge.to(device)
         self.cfg = cfg
         self.logger = logger
         self.device = device
+        self.error_log_dir = error_log_dir
         self.best_metric = 0.0
         self.start_epoch = 0
         self.modalities = ["visual", "text", "signal"]
@@ -62,7 +106,7 @@ class MAPPOTrainer:
         self.alignment_loss = ContrastiveAlignmentLoss(margin=1.0)
         self._rebuild_opts()
 
-    def _rebuild_opts(self):
+    def _rebuild_opts(self) -> None:
         ep = [p for p in self.expert_system.parameters() if p.requires_grad]
         jp = [p for p in self.judge.parameters() if p.requires_grad]
         if not ep:
@@ -72,7 +116,7 @@ class MAPPOTrainer:
         self.opt_experts = torch.optim.Adam(ep, lr=self.cfg.stage2_lr_actor)
         self.opt_judge   = torch.optim.Adam(jp, lr=self.cfg.stage2_lr_critic)
 
-    def _set_phase(self, phase):
+    def _set_phase(self, phase: str) -> None:
         if phase == "judge":
             for p in self.expert_system.parameters():
                 p.requires_grad = False
@@ -85,8 +129,19 @@ class MAPPOTrainer:
                 p.requires_grad = False
         self._rebuild_opts()
 
-    def _rollout_episode(self, batch, epoch):
-        # Move all tensor values in batch to device first
+    # ------------------------------------------------------------------
+    # Rollout
+    # ------------------------------------------------------------------
+
+    def _rollout_episode(self, batch: Dict, epoch: int) -> EpisodeBuffer:
+        try:
+            return self._rollout_episode_impl(batch, epoch)
+        except Exception:
+            tag = f"error_stage2_rollout_ep{epoch}"
+            _write_error_file(self.error_log_dir, tag)
+            raise
+
+    def _rollout_episode_impl(self, batch: Dict, epoch: int) -> EpisodeBuffer:
         batch = {k: v.to(self.device) if torch.is_tensor(v) else v for k, v in batch.items()}
         B = batch["label"].size(0)
         d = self.device
@@ -99,6 +154,12 @@ class MAPPOTrainer:
         n_q = torch.zeros(B, device=d)
 
         eo = self.expert_system(batch, deterministic=False)
+        # Sanitise expert outputs: replace any NaN/Inf with zeros
+        for nm in eo:
+            for key in ("eR", "eT", "belief"):
+                if key in eo[nm] and torch.is_tensor(eo[nm][key]):
+                    if torch.isnan(eo[nm][key]).any() or torch.isinf(eo[nm][key]).any():
+                        eo[nm][key] = torch.nan_to_num(eo[nm][key], nan=0.0, posinf=1.0, neginf=-1.0)
         jout = None
 
         for step in range(self.cfg.max_episode_steps):
@@ -151,7 +212,7 @@ class MAPPOTrainer:
                 value=jout["value"].detach(),
                 done=nd.clone(),
                 step=step,
-                available_mask=avail.clone().detach(),  # FIX: store for PPO
+                available_mask=avail.clone().detach(),
             ))
             done = nd
             if done.all():
@@ -161,7 +222,11 @@ class MAPPOTrainer:
         buf.n_queries = n_q.detach()
         return buf
 
-    def _gae(self, buf):
+    # ------------------------------------------------------------------
+    # GAE
+    # ------------------------------------------------------------------
+
+    def _gae(self, buf: EpisodeBuffer):
         T = len(buf.transitions)
         B = buf.labels.size(0)
         d = self.device
@@ -181,12 +246,15 @@ class MAPPOTrainer:
         adv = (adv - af.mean()) / (af.std() + 1e-8)
         return ret, adv
 
-    def _judge_ppo(self, buf, ret, adv):
+    # ------------------------------------------------------------------
+    # PPO judge update
+    # ------------------------------------------------------------------
+
+    def _judge_ppo(self, buf: EpisodeBuffer, ret, adv) -> Dict:
         tp = tv = te = 0.0
         clips = []
         for _ in range(self.cfg.ppo_epochs):
             for t, tr in enumerate(buf.transitions):
-                # FIX: pass available_mask so log_prob recomputation matches rollout
                 mask = tr.available_mask.to(self.device) if tr.available_mask is not None else None
                 lp, ent, v = self.judge.compute_log_prob_entropy(
                     tr.obs_lambda.to(self.device),
@@ -222,17 +290,22 @@ class MAPPOTrainer:
             "ppo_clip_fraction": sum(clips) / max(len(clips), 1),
         }
 
-    def _expert_update(self, bd, labels):
+    # ------------------------------------------------------------------
+    # Expert update
+    # ------------------------------------------------------------------
+
+    def _expert_update(self, bd: Dict, labels: torch.Tensor) -> Dict:
         aln = self.alignment_loss
         labels = labels.to(self.device)
         eo = self.expert_system(bd, deterministic=False)
         eRs, eTs = self.expert_system.get_embeddings(eo)
-        total = torch.tensor(0.0, device=self.device)
+        # start with differentiable zero anchored to model params
+        total = (list(self.expert_system.parameters())[0] * 0).sum()
         for nm in self.modalities:
             if nm not in eo:
                 continue
             total = total + aln(eo[nm]["eR"], eo[nm]["eT"], labels)
-        decorr = torch.tensor(0.0, device=self.device)
+        decorr = (list(self.expert_system.parameters())[0] * 0).sum()  # zero but differentiable
         if eRs.size(1) > 1:
             decorr = self.decorr_penalty(eRs) + self.decorr_penalty(eTs)
             total = total + self.cfg.decorr_penalty * decorr
@@ -245,7 +318,19 @@ class MAPPOTrainer:
             "decorr_penalty": float(decorr.item() if torch.is_tensor(decorr) else decorr),
         }
 
-    def train_epoch(self, loader, epoch):
+    # ------------------------------------------------------------------
+    # Train epoch
+    # ------------------------------------------------------------------
+
+    def train_epoch(self, loader: DataLoader, epoch: int) -> Dict:
+        try:
+            return self._train_epoch_impl(loader, epoch)
+        except Exception:
+            tag = f"error_stage2_epoch{epoch}"
+            _write_error_file(self.error_log_dir, tag)
+            raise
+
+    def _train_epoch_impl(self, loader: DataLoader, epoch: int) -> Dict:
         phase = "judge" if (epoch % 10) < 5 else "expert"
         self._set_phase(phase)
         self.expert_system.train()
@@ -253,7 +338,9 @@ class MAPPOTrainer:
         tr_tot = acc_tot = 0.0
         extra = {}
         n = 0
-        for batch in self.logger.progress(loader, desc=f"  Stage2 Ep {epoch} [{phase}]", leave=False):
+        n_batches_total = len(loader)
+        log_interval = max(1, n_batches_total // 5)
+        for batch_idx, batch in enumerate(loader):
             buf = self._rollout_episode(batch, epoch)
             ret, adv = self._gae(buf)
             bd = {k: v.to(self.device) if torch.is_tensor(v) else v for k, v in batch.items()}
@@ -266,6 +353,15 @@ class MAPPOTrainer:
                 acc_tot += (pred == buf.labels.cpu()).float().mean().item()
             tr_tot += sum(t.reward.mean().item() for t in buf.transitions)
             n += 1
+            if batch_idx % log_interval == 0 or batch_idx == n_batches_total - 1:
+                pct = 100.0 * (batch_idx + 1) / n_batches_total
+                avg_rew = tr_tot / max(n, 1)
+                avg_acc = acc_tot / max(n, 1)
+                self.logger.info(
+                    f"  [S2 Ep {epoch:02d} {phase}] "
+                    f"Batch {batch_idx+1:04d}/{n_batches_total} ({pct:5.1f}%) | "
+                    f"avg_reward={avg_rew:.4f} | acc={avg_acc:.4f}"
+                )
         m = {
             "mean_episode_reward": tr_tot / max(n, 1),
             "judge_accuracy": acc_tot / max(n, 1),
@@ -274,17 +370,28 @@ class MAPPOTrainer:
         m.update(extra)
         return m
 
+    # ------------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------------
+
     @torch.no_grad()
-    def validate(self, loader, epoch):
+    def validate(self, loader: DataLoader, epoch: int) -> Dict:
+        try:
+            return self._validate_impl(loader, epoch)
+        except Exception:
+            tag = f"error_stage2_val_epoch{epoch}"
+            _write_error_file(self.error_log_dir, tag)
+            raise
+
+    def _validate_impl(self, loader: DataLoader, epoch: int) -> Dict:
         self.expert_system.eval()
         self.judge.eval()
-        # FIX: do NOT set requires_grad=False here ? @torch.no_grad() is sufficient
-        # and permanently disabling gradients breaks the subsequent train_epoch.
         tacc = 0.0
-        ab = []
-        al = []
+        ab: List[float] = []
+        al: List[int] = []
         n = 0
-        for batch in self.logger.progress(loader, desc=f"  Val {epoch}", leave=False):
+        n_val_total = len(loader)
+        for val_idx, batch in enumerate(loader):
             buf = self._rollout_episode(batch, epoch)
             if buf.final_belief is not None:
                 pred = (buf.final_belief >= 0.5).long().cpu()
@@ -292,6 +399,11 @@ class MAPPOTrainer:
                 ab.extend(buf.final_belief.cpu().tolist())
                 al.extend(buf.labels.cpu().tolist())
             n += 1
+            if val_idx == n_val_total - 1:
+                self.logger.info(
+                    f"  [S2 Ep {epoch:02d}] Val done | "
+                    f"acc={tacc/max(n,1):.4f}"
+                )
         try:
             from sklearn.metrics import roc_auc_score
             auc = roc_auc_score(al, ab) if len(set(al)) > 1 else 0.5
@@ -299,7 +411,16 @@ class MAPPOTrainer:
             auc = 0.5
         return {"val_accuracy": tacc / max(n, 1), "val_auc": auc}
 
-    def run(self, train_loader, val_loader, resume=False):
+    # ------------------------------------------------------------------
+    # Full run
+    # ------------------------------------------------------------------
+
+    def run(
+        self,
+        train_loader: DataLoader,
+        val_loader: DataLoader,
+        resume: bool = False,
+    ) -> None:
         self.logger.info("=" * 60)
         self.logger.info("STAGE 2: MAPPO Cooperative Multi-Agent Training")
         self.logger.info(f"  Total epochs: {self.cfg.stage2_total_epochs}")
@@ -319,15 +440,29 @@ class MAPPOTrainer:
             self.logger.info("Stage 2 already complete, skipping.")
             return
 
-        for epoch in range(self.start_epoch, self.cfg.stage2_total_epochs):
+        from tqdm import tqdm as _tqdm
+        epoch_bar = _tqdm(
+            range(self.start_epoch, self.cfg.stage2_total_epochs),
+            desc="Stage2", unit="epoch", dynamic_ncols=True,
+            initial=self.start_epoch,
+            total=self.cfg.stage2_total_epochs,
+        )
+        for epoch in epoch_bar:
             t0 = time.time()
             tm = self.train_epoch(train_loader, epoch)
             vm = self.validate(val_loader, epoch)
-            self.logger.log_epoch(epoch, phase="stage2", **{**tm, **vm})
+            # Remove "phase" from tm to avoid duplicate kwarg with log_epoch
+            tm_log = {k: v for k, v in tm.items() if k != "phase"}
+            self.logger.log_epoch(epoch, phase="stage2", **{**tm_log, **vm})
             best = vm["val_auc"] > self.best_metric
             if best:
                 self.best_metric = vm["val_auc"]
             if (epoch + 1) % self.cfg.checkpoint_every_n_epochs == 0 or best:
+                _ckpt_reason = "BEST MODEL" if best else "checkpoint"
+                self.logger.info(
+                    f"  >>> [{_ckpt_reason}] Epoch {epoch:03d} saving... | "
+                    f"val_auc={vm['val_auc']:.4f} (best={self.best_metric:.4f})"
+                )
                 st = {
                     "epoch": epoch,
                     "stage": "stage2",
@@ -345,7 +480,16 @@ class MAPPOTrainer:
                     checkpoint_filename("stage2", epoch),
                     is_best=best,
                 )
+                self.logger.info(
+                    f"  >>> Checkpoint saved -> "
+                    f"{self.cfg.checkpoint_dir}/{checkpoint_filename('stage2', epoch)}"
+                )
             tag = "BEST " if best else ""
+            epoch_bar.set_postfix(
+                reward=f"{tm.get('mean_episode_reward',0):.4f}",
+                auc=f"{vm['val_auc']:.4f}",
+                best="*" if best else "",
+            )
             self.logger.info(
                 f"Stage2 Ep {epoch:03d} | "
                 f"reward={tm.get('mean_episode_reward', 0):.4f} | "

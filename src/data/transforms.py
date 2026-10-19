@@ -69,6 +69,11 @@ def _build_srm_filters() -> np.ndarray:
         # horizontal flip
         filters.append(np.fliplr(arr).tolist())
 
+    # Pad to exactly 30 by adding shifted versions of existing filters
+    while len(filters) < 30:
+        base = np.array(filters[len(filters) % len(base_kernels)], dtype=np.float32)
+        shifted = np.roll(base, len(filters) % 3 + 1, axis=0)
+        filters.append(shifted.tolist())
     filters = filters[:30]  # ensure exactly 30
     srm = np.array(filters, dtype=np.float32)  # (30, 5, 5)
     srm = srm[:, np.newaxis, :, :]  # (30, 1, 5, 5)
