@@ -1,0 +1,16 @@
+flowchart LR
+    subgraph Frozen["FROZEN (~4.7M)"]
+        VE[EfficientNet-B0<br/>4.0M]
+        TE[Text CNN<br/>0.4M]
+        SE[Signal ResNet<br/>0.3M]
+    end
+
+    subgraph Trainable["TRAINABLE (~2.5M)"]
+        SA["Spatial Alignment<br/>~400K"]
+        PE["PE + Modality + Type emb<br/>~5K"]
+        QQ["16 queries<br/>4K"]
+        QF["Q-Former (2 layers)<br/>~2.1M"]
+        BH["Belief Head<br/>~33K"]
+    end
+
+    Frozen -->|"cached features<br/>(no grad)"| Trainable

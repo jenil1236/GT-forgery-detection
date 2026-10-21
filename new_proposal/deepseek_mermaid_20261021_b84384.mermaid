@@ -1,0 +1,19 @@
+flowchart LR
+    subgraph VS["Visual stream"]
+        VI["ref: B×1280×7×7<br/>test: B×1280×7×7"]
+        VI --> VP["1×1 Conv<br/>1280→256"]
+        VP --> VA["Adaptive Pool<br/>→ 7×7"]
+        VA --> VO["ref: B×49×256<br/>test: B×49×256"]
+    end
+    subgraph TS["Text stream"]
+        TI["ref: B×32×H×W<br/>test: B×32×H×W"]
+        TI --> TP["1×1 Conv<br/>32→256"]
+        TP --> TA["Adaptive Pool<br/>→ 7×7"]
+        TA --> TO["ref: B×49×256<br/>test: B×49×256"]
+    end
+    subgraph SS["Signal stream"]
+        SI["ref: B×256×7×7<br/>test: B×256×7×7"]
+        SI --> SP["1×1 Conv<br/>256→256"]
+        SP --> SAl["Adaptive Pool<br/>→ 7×7"]
+        SAl --> SO["ref: B×49×256<br/>test: B×49×256"]
+    end

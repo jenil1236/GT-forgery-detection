@@ -1,0 +1,18 @@
+flowchart TD
+    QF["Q-Former output<br/>(B, 16, 256)"]
+
+    QF --> BM["Belief MLP (shared across queries)<br/>Linear 256→128<br/>ReLU<br/>Linear 128→1"]
+    QF --> WM["Weight MLP<br/>Linear 256→1"]
+
+    BM --> PQ["Per-query logits<br/>(B, 16)"]
+    WM --> W["Raw weights<br/>(B, 16)"]
+
+    W --> SM["Softmax over queries<br/>(dim = -1)"]
+    SM --> WN["Normalized weights<br/>(B, 16)"]
+
+    PQ --> PROD["Weighted sum<br/>Σ_i w_i · logit_i"]
+    WN --> PROD
+
+    PROD --> FL["Final logit<br/>(B,)"]
+    FL --> SIG["Sigmoid"]
+    SIG --> B["Belief ∈ [0, 1]"]
