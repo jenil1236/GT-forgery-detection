@@ -366,13 +366,26 @@ class Stage1Trainer:
         self.logger.info("=" * 60)
 
         if resume:
-            ckpt_path = find_latest_checkpoint(self.cfg.checkpoint_dir, "stage1_visual")
+            # Find the checkpoint with the HIGHEST epoch number
+            # (best_stage1_visual.pt may be from an earlier epoch than the last)
+            import glob as _glob
+            epoch_ckpts = sorted(
+                _glob.glob(os.path.join(self.cfg.checkpoint_dir, "stage1_visual_epoch*.pt")),
+                key=lambda p: int(p.split("epoch")[-1].replace(".pt", ""))
+            )
+            # prefer latest epoch checkpoint; fall back to best if no epoch ckpt
+            if epoch_ckpts:
+                ckpt_path = epoch_ckpts[-1]  # highest epoch
+            else:
+                ckpt_path = find_best_checkpoint(self.cfg.checkpoint_dir, "stage1_visual")
+
             if ckpt_path:
                 self.logger.info(f"Resuming Stage 1 from {ckpt_path}")
                 state = torch.load(ckpt_path, map_location=self.device, weights_only=True)
                 self.visual_enc.load_state_dict(state["model_state"])
                 self.start_epoch = state["epoch"] + 1
                 self.best_sep_ratio = state.get("best_metric", 0.0)
+                # load best weights for text and signal encoders
                 for enc_name, enc in [("stage1_text", self.text_enc), ("stage1_signal", self.signal_enc)]:
                     best = find_best_checkpoint(self.cfg.checkpoint_dir, enc_name)
                     if best:

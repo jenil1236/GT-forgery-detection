@@ -283,7 +283,25 @@ def main() -> None:
     # 7. Stage 2: MAPPO cooperative training
     # ------------------------------------------------------------------
     if not cfg.skip_stage2:
-        # Sanitise weights before Stage 2: GradScaler can leave NaN in fp16 params
+        # Load BEST Stage 1 encoder checkpoints ONLY on fresh Stage 2 start.
+        # On resume, Stage 2 checkpoint already has the trained expert weights.
+        from src.utils.checkpoint import find_best_checkpoint, find_latest_checkpoint, load_model_weights
+        _stage2_exists = find_latest_checkpoint(cfg.checkpoint_dir, "stage2") is not None
+        if not _stage2_exists:
+            logger.info("  Fresh Stage 2 -- loading best Stage 1 encoder weights")
+            for enc_name, enc in [
+                ("stage1_visual", visual_enc),
+                ("stage1_text",   text_enc),
+                ("stage1_signal", signal_enc),
+            ]:
+                best_ckpt = find_best_checkpoint(cfg.checkpoint_dir, enc_name)
+                if best_ckpt:
+                    load_model_weights(enc, best_ckpt, device=cfg.device)
+                    logger.info(f"    Loaded best {enc_name} from {best_ckpt}")
+        else:
+            logger.info("  Resuming Stage 2 -- expert weights from Stage 2 checkpoint")
+
+        # Sanitise weights: fix any NaN/Inf left by training
         _nan_count = 0
         for pname, param in expert_system.named_parameters():
             if torch.isnan(param.data).any() or torch.isinf(param.data).any():

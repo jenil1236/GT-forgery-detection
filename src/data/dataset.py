@@ -167,17 +167,32 @@ class IDNetDataset(Dataset):
             else:
                 log.warning("Forgery folder missing, will skip: %s", fd)
 
-        # Build flat sample list: (original_fname, label, forgery_type, fraud_path)
-        # fraud1-4 use exact filenames matching positive/
-        self.samples: List[Tuple[str, int, str, Optional[Path]]] = []
+        # Build forged sample list first (one per fraud type per original)
+        self._forged_samples: List[Tuple[str, int, str, Optional[Path]]] = []
         for fname in self.originals:
-            # Genuine
-            self.samples.append((fname, 0, "genuine", None))
-            # One forged sample per forgery folder (exact filename match)
             for ft, fd in self.forgery_dirs.items():
                 candidate = fd / fname
                 if candidate.exists():
-                    self.samples.append((fname, 1, ft, candidate))
+                    self._forged_samples.append((fname, 1, ft, candidate))
+
+        n_forged = len(self._forged_samples)
+
+        # Build genuine pairs to MATCH the number of forged pairs.
+        # Each pair uses a different random reference, so all pairs are unique.
+        # This gives a 1:1 balance without repeating any (ref, test) combination.
+        rng_balance = random.Random(seed + 1)  # separate seed for reproducibility
+        self._genuine_samples: List[Tuple[str, int, str, Optional[Path]]] = []
+        for i in range(n_forged):
+            # cycle through originals so all originals get coverage
+            fname = self.originals[i % len(self.originals)]
+            self._genuine_samples.append((fname, 0, "genuine", None))
+
+        # Combined balanced sample list
+        self.samples: List[Tuple[str, int, str, Optional[Path]]] = (
+            self._genuine_samples + self._forged_samples
+        )
+        # Shuffle so genuine and forged are interleaved
+        rng_balance.shuffle(self.samples)
 
         # Seed-stable RNG for reference selection (reproducible per split)
         self._rng = random.Random(seed)
@@ -375,6 +390,12 @@ def build_dataloaders(cfg) -> Tuple[DataLoader, DataLoader]:
         pin_memory=(cfg.device == "cuda"),
         persistent_workers=(cfg.num_workers > 0),
     )
+
+    # Dataset already balanced: equal genuine and forged pairs
+    # (built in IDNetDataset.__init__ by expanding genuine pairs)
+    n_genuine = sum(1 for s in train_ds.samples if s[1] == 0)
+    n_forged  = sum(1 for s in train_ds.samples if s[1] == 1)
+    print(f"[DataLoader] Balanced dataset: genuine={n_genuine}, forged={n_forged}")
 
     train_loader = DataLoader(
         train_ds,
