@@ -1,0 +1,28 @@
+flowchart TD
+    A["ref: (B, 3, 224, 224)<br/>test: (B, 3, 224, 224)"]
+
+    A --> B1["Visual Encoder<br/>(frozen EfficientNet-B0)"]
+    A --> B2["Text Encoder<br/>(frozen CNN)"]
+    A --> B3["Signal Encoder<br/>(frozen ResNet)"]
+
+    B1 --> C1["visual: (B, 1280, 7, 7) × 2"]
+    B2 --> C2["text: (B, 32, H, W) × 2"]
+    B3 --> C3["signal: (B, 256, 7, 7) × 2"]
+
+    C1 --> D1["1×1 Conv 1280→256<br/>Adaptive Pool → 7×7<br/>(B, 256, 7, 7)"]
+    C2 --> D2["1×1 Conv 32→256<br/>Adaptive Pool → 7×7<br/>(B, 256, 7, 7)"]
+    C3 --> D3["1×1 Conv 256→256<br/>Adaptive Pool → 7×7<br/>(B, 256, 7, 7)"]
+
+    D1 --> E1["Flatten → (B, 49, 256)<br/>+ PE + modality + type"]
+    D2 --> E2["Flatten → (B, 49, 256)<br/>+ PE + modality + type"]
+    D3 --> E3["Flatten → (B, 49, 256)<br/>+ PE + modality + type"]
+
+    E1 --> F["Concat 6 streams<br/>(B, 294, 256)"]
+    E2 --> F
+    E3 --> F
+
+    F --> G["Q-Former layer 1<br/>(B, 16, 256)"]
+    G --> H["Q-Former layer 2<br/>(B, 16, 256)"]
+
+    H --> I["Belief Head<br/>per-query logit (B, 16)<br/>weights (B, 16)"]
+    I --> J["Final logit (B,)<br/>+ trace artifacts"]

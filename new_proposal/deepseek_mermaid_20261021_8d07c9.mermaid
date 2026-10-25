@@ -1,0 +1,13 @@
+flowchart LR
+    subgraph Layer["Single Q-Former Layer"]
+        direction TB
+        QI["Q (B, 16, 256)"]
+        QI --> SA["MultiHead Self-Attn<br/>8 heads"]
+        SA --> R1["+ Q"] --> N1["LayerNorm"]
+        N1 --> CA["MultiHead Cross-Attn<br/>Q=queries, K=V=pool<br/>8 heads"]
+        KV["Pool (B, 294, 256)"] -.-> CA
+        CA --> R2["+ prev"] --> N2["LayerNorm"]
+        N2 --> FF["FFN<br/>Linear 256→1024<br/>GELU<br/>Linear 1024→256"]
+        FF --> R3["+ prev"] --> N3["LayerNorm"]
+        N3 --> QO["Q' (B, 16, 256)"]
+    end

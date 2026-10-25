@@ -1,0 +1,29 @@
+flowchart TD
+    subgraph Streams["6 streams after alignment (each 49 × 256)"]
+        VR["visual_ref"]
+        VT["visual_test"]
+        TR["text_ref"]
+        TT["text_test"]
+        SR["signal_ref"]
+        ST["signal_test"]
+    end
+
+    subgraph Enrich["Additive embeddings"]
+        SPE["Shared 2D sinusoidal PE<br/>(same encoding for grid cell i,j<br/>across all 6 streams)"]
+        ME["Modality embedding<br/>visual / text / signal"]
+        TYE["Type embedding<br/>ref / test"]
+    end
+
+    VR --> ADD1["+ PE + ME_vis + TYE_ref"]
+    VT --> ADD2["+ PE + ME_vis + TYE_test"]
+    TR --> ADD3["+ PE + ME_txt + TYE_ref"]
+    TT --> ADD4["+ PE + ME_txt + TYE_test"]
+    SR --> ADD5["+ PE + ME_sig + TYE_ref"]
+    ST --> ADD6["+ PE + ME_sig + TYE_test"]
+
+    ADD1 --> CAT["Concat along token axis<br/>(B, 294, 256)"]
+    ADD2 --> CAT
+    ADD3 --> CAT
+    ADD4 --> CAT
+    ADD5 --> CAT
+    ADD6 --> CAT
