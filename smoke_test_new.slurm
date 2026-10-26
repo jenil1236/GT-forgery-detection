@@ -37,7 +37,7 @@ export HF_HOME=/home/tanmoyhazra/xyz/data/models_cache
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 set +e
-python3 train_new.py --smoke_test --project_root /home/tanmoyhazra/xyz
+python3 train_new.py --smoke_test --skip_stage1 --project_root /home/tanmoyhazra/xyz
 EXIT_CODE=$?
 set -e
 

@@ -45,7 +45,7 @@ class Config:
 
     # ── Stage 1 (metric learning pretraining) ─────────────────────────────
     stage1_epochs: int = 30
-    stage1_batch_size: int = 16
+    stage1_batch_size: int = 32
     stage1_lr: float = 1e-4
     stage1_weight_decay: float = 1e-4
     infonce_temperature: float = 0.07
